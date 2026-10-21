@@ -1,16 +1,16 @@
-name: Build chiaki-ng msys2 x86 Windows
+name: Build Chiaki-ng Windows - UG79 controller probe
 
 on:
   workflow_dispatch:
     inputs:
       libplacebo_version:
-        description: "libplacebo git tag to build"
+        description: "libplacebo git revision to build"
         required: false
         default: "3be579e6c7f6b421d9ac3ab4860edc437c50b3eb"
 
 jobs:
   build-windows_x64-msys2:
-    name: Build windows msys2 version
+    name: Build Windows x64 portable UG79 probe
     runs-on: windows-latest
     defaults:
       run:
@@ -63,19 +63,153 @@ jobs:
             spirv-cross:p
             vulkan:p
             vulkan-headers:p
-            
-      - name: Install python protobuf and zip
+
+      - name: Install Python protobuf and zip
         run: |
           pip install protobuf
           pacman -S git make unzip zip --noconfirm
 
-      - name: Build libbplacebo
+      - name: Apply UG79 local-controller probe (temporary build checkout only)
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          
+          cpp_path = Path('gui/src/streamsession.cpp')
+          hpp_path = Path('gui/include/streamsession.h')
+          cmake_path = Path('gui/CMakeLists.txt')
+          cpp = cpp_path.read_text(encoding='utf-8')
+          hpp = hpp_path.read_text(encoding='utf-8')
+          cmake = cmake_path.read_text(encoding='utf-8')
+          
+          
+          def change(src, old, new, count, description):
+              found = src.count(old)
+              if found != count:
+                  raise RuntimeError(f'{description}: expected {count} exact match(es), got {found}. Refusing to patch unknown source.')
+              return src.replace(old, new, count)
+          
+          
+          hpp = change(
+              hpp,
+              '\t\tChiakiControllerState keyboard_state;',
+              '\t\tChiakiControllerState keyboard_state;\n\t\tChiakiControllerState ug79_automation_state;',
+              1, 'controller state declaration',
+          )
+          cpp = change(
+              cpp,
+              '#include <QKeyEvent>',
+              '#include <QKeyEvent>\n#include <QTcpServer>\n#include <QTcpSocket>\n#include <QHostAddress>\n#include <QDebug>',
+              1, 'Qt Network headers',
+          )
+          cpp = change(
+              cpp,
+              '\tchiaki_controller_state_set_idle(&keyboard_state);',
+              '\tchiaki_controller_state_set_idle(&keyboard_state);\n\tchiaki_controller_state_set_idle(&ug79_automation_state);',
+              1, 'initial controller state',
+          )
+          cpp = change(
+              cpp,
+              '\tchiaki_controller_state_or(&state, &state, &touch_state);',
+              '\tchiaki_controller_state_or(&state, &state, &touch_state);\n\tchiaki_controller_state_or(&state, &state, &ug79_automation_state);',
+              2, 'both controller send paths',
+          )
+          
+          server_code = r'''	// UG79 prototype: local-only controller injection. No external network exposure.
+          	// Only DOWN, STOP and PING are understood; a press releases after 150 ms.
+          	auto *ug79_pulse_timer = new QTimer(this);
+          	ug79_pulse_timer->setSingleShot(true);
+          	connect(ug79_pulse_timer, &QTimer::timeout, this, [this]() {
+          		ug79_automation_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
+          		if(connected)
+          			SendFeedbackState();
+          	});
+          
+          	auto *ug79_server = new QTcpServer(this);
+          	connect(ug79_server, &QTcpServer::newConnection, this,
+          		[this, ug79_server, ug79_pulse_timer]() {
+          		while(ug79_server->hasPendingConnections())
+          		{
+          			auto *client = ug79_server->nextPendingConnection();
+          			client->setReadBufferSize(64);
+          			connect(client, &QTcpSocket::disconnected, client, &QObject::deleteLater);
+          			connect(client, &QTcpSocket::readyRead, this,
+          				[this, client, ug79_pulse_timer]() {
+          				if(client->bytesAvailable() > 32)
+          				{
+          					client->write("ERR command too long\n");
+          					client->disconnectFromHost();
+          					return;
+          				}
+          				if(!client->canReadLine())
+          					return;
+          				const QByteArray command = client->readLine(33).trimmed().toUpper();
+          				if(command == "PING")
+          					client->write(connected ? "READY\n" : "NOT_CONNECTED\n");
+          				else if(command == "STOP")
+          				{
+          					ug79_pulse_timer->stop();
+          					ug79_automation_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
+          					if(connected)
+          						SendFeedbackState();
+          					client->write("STOPPED\n");
+          				}
+          				else if(command == "DOWN")
+          				{
+          					if(!connected)
+          						client->write("ERR not connected\n");
+          					else if(ug79_pulse_timer->isActive())
+          						client->write("ERR busy\n");
+          					else
+          					{
+          						ug79_automation_state.buttons |= CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
+          						SendFeedbackState();
+          						ug79_pulse_timer->start(150);
+          						client->write("OK DOWN 150ms\n");
+          					}
+          				}
+          				else
+          					client->write("ERR unknown command\n");
+          				client->disconnectFromHost();
+          			});
+          		}
+          	});
+          	if(ug79_server->listen(QHostAddress::LocalHost, 39777))
+          		qInfo() << "UG79 probe listening on 127.0.0.1:39777";
+          	else
+          		qWarning() << "UG79 probe unavailable:" << ug79_server->errorString();
+          '''
+          
+          cpp = change(
+              cpp,
+              '\tStartAudioOutDrainThread();\n}',
+              '\tStartAudioOutDrainThread();\n' + server_code + '}',
+              1, 'StreamSession constructor tail',
+          )
+          cmake = change(
+              cmake,
+              'find_package(Qt6 REQUIRED COMPONENTS Core Gui Concurrent Svg Qml Quick Widgets)',
+              'find_package(Qt6 REQUIRED COMPONENTS Core Gui Concurrent Svg Qml Quick Widgets Network)',
+              1, 'Qt package selection',
+          )
+          cmake = change(
+              cmake,
+              'target_link_libraries(chiaki Qt::Core Qt::Gui',
+              'target_link_libraries(chiaki Qt::Network Qt::Core Qt::Gui',
+              1, 'Qt Network linkage',
+          )
+          cpp_path.write_text(cpp, encoding='utf-8')
+          hpp_path.write_text(hpp, encoding='utf-8')
+          cmake_path.write_text(cmake, encoding='utf-8')
+          print('UG79 local controller probe injected successfully into temporary build checkout.')
+          PY
+
+      - name: Build libplacebo
         run: |
           scripts/build-libplacebo-windows.sh
         env:
           LIBPLACEBO_VERSION: ${{ github.event.inputs.libplacebo_version }}
 
-      - name: Setup ffmpeg
+      - name: Setup FFmpeg
         run: |
           curl -LO https://github.com/streetpea/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip
           unzip ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip
@@ -83,51 +217,35 @@ jobs:
           cp -a "ffmpeg-n7.1-latest-win64-gpl-shared-7.1/include/." /mingw64/include
           cp -a "ffmpeg-n7.1-latest-win64-gpl-shared-7.1/lib/." /mingw64/lib
 
-      - name: Build sdl2-compat
+      - name: Build SDL2 compatibility layer
         run: |
           INSTALL_PREFIX=/mingw64 scripts/build-sdl2-compat.sh .
           cp /mingw64/lib/pkgconfig/sdl2-compat.pc /mingw64/lib/pkgconfig/sdl2.pc
 
-      - name: Configure chiaki-ng
+      - name: Configure Chiaki-ng
         run: |
           cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCHIAKI_ENABLE_CLI=OFF
 
-      - name: Build chiaki-ng
+      - name: Build Chiaki-ng
         run: |
           cmake --build build --config Release --clean-first --target chiaki
-          
-      - name: Deploy chiaki-ng
+
+      - name: Deploy portable Chiaki-ng
         run: |
           ./scripts/deploy-windows-msys2.sh chiaki-ng-Win build/gui/chiaki.exe "${{ github.workspace }}/build/third-party/cpp-steam-tools" /mingw64 gui/src/qml
 
-      - name: Package chiaki-ng
+      - name: Add AMD Vulkan workaround launcher
         run: |
-          CHIAKI_VERSION_MAJOR="$(grep 'CHIAKI_VERSION_MAJOR' CMakeLists.txt | grep -Eo '[0-9]+')"
-          CHIAKI_VERSION_MINOR="$(grep 'CHIAKI_VERSION_MINOR' CMakeLists.txt | grep -Eo '[0-9]+')"
-          CHIAKI_VERSION_PATCH="$(grep 'CHIAKI_VERSION_PATCH' CMakeLists.txt | grep -Eo '[0-9]+')"
-          RELEASE_PACKAGE_FILE="chiaki-ng-win_x64-MSYS2-portable-$CHIAKI_VERSION_MAJOR.$CHIAKI_VERSION_MINOR.$CHIAKI_VERSION_PATCH-test-build-${{ github.sha }}.zip"
-          zip -r $RELEASE_PACKAGE_FILE chiaki-ng-Win
-          echo "RELEASE_PACKAGE_PATH=${RELEASE_PACKAGE_FILE}" >> $GITHUB_ENV
+          printf '@echo off\r\nset "VK_LOADER_DRIVERS_DISABLE=*dzn*"\r\nstart "" "%%~dp0chiaki.exe"\r\n' > chiaki-ng-Win/Launch-UG79.cmd
 
-      - name: Upload chiaki-ng Artifact
+      - name: Package portable prototype
+        run: |
+          zip -r chiaki-ng-UG79-PS4-controller-probe-win64.zip chiaki-ng-Win
+
+      - name: Upload portable prototype
         uses: actions/upload-artifact@v4
         with:
-          name: chiaki-ng-win_x64-MSYS2-Release-portable.zip
-          path: ${{ env.RELEASE_PACKAGE_PATH }}
+          name: chiaki-ng-UG79-PS4-controller-probe-win64
+          path: chiaki-ng-UG79-PS4-controller-probe-win64.zip
           if-no-files-found: error
           retention-days: 7
-
-      - name: Compile .ISS to .EXE Installer
-        uses: Minionguyjpro/Inno-Setup-Action@v1.2.7
-        with:
-          path: "scripts/chiaki-ng.iss"
-          options: /O+
-
-      - name: Upload chiaki-ng Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: chiaki-ng-win_x64-MSYS2-Release-installer.exe
-          path: chiaki-ng-windows-installer.exe
-          if-no-files-found: error
-          retention-days: 7
-          
