@@ -105,7 +105,7 @@ jobs:
               cpp,
               '\tchiaki_controller_state_set_idle(&keyboard_state);',
               '\tchiaki_controller_state_set_idle(&keyboard_state);\n\tchiaki_controller_state_set_idle(&ug79_automation_state);',
-              1, 'initial controller state',
+              3, 'initial controller state',
           )
           cpp = change(
               cpp,
