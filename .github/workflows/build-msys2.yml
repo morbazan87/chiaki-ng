@@ -94,3 +94,212 @@ jobs:
               1, 'controller state declaration',
           )
           cpp = change(
+              cpp,
+              '#include <QKeyEvent>',
+              '#include <QKeyEvent>\n#include <QTcpServer>\n#include <QTcpSocket>\n#include <QHostAddress>\n#include <QDebug>',
+              1, 'Qt Network headers',
+          )
+          cpp = change(
+              cpp,
+              '\tchiaki_controller_state_set_idle(&keyboard_state);',
+              '\tchiaki_controller_state_set_idle(&keyboard_state);\n\tchiaki_controller_state_set_idle(&ug79_automation_state);',
+              3, 'initial controller state',
+          )
+          cpp = change(
+              cpp,
+              '\tchiaki_controller_state_or(&state, &state, &touch_state);',
+              '\tchiaki_controller_state_or(&state, &state, &touch_state);\n\tchiaki_controller_state_or(&state, &state, &ug79_automation_state);',
+              2, 'both controller send paths',
+          )
+
+          server_code = r'''    // Build #4: loopback-only controller automation; timed automatic neutral release.
+              auto *ug79_pulse_timer = new QTimer(this);
+              ug79_pulse_timer->setSingleShot(true);
+              connect(ug79_pulse_timer, &QTimer::timeout, this, [this]() {
+                  chiaki_controller_state_set_idle(&ug79_automation_state);
+                  if(connected)
+                      SendFeedbackState();
+              });
+
+              auto *ug79_server = new QTcpServer(this);
+              connect(ug79_server, &QTcpServer::newConnection, this,
+                  [this, ug79_server, ug79_pulse_timer]() {
+                  while(ug79_server->hasPendingConnections())
+                  {
+                      auto *client = ug79_server->nextPendingConnection();
+                      client->setReadBufferSize(128);
+                      connect(client, &QTcpSocket::disconnected, client, &QObject::deleteLater);
+                      connect(client, &QTcpSocket::readyRead, this,
+                          [this, client, ug79_pulse_timer]() {
+                          if(client->bytesAvailable() > 64)
+                          {
+                              client->write("ERR command too long\n");
+                              client->disconnectFromHost();
+                              return;
+                          }
+                          if(!client->canReadLine())
+                              return;
+                          const QByteArray command = client->readLine(65).trimmed().toUpper().simplified();
+                          if(command == "PING")
+                              client->write(connected ? "READY\n" : "NOT_CONNECTED\n");
+                          else if(command == "STOP")
+                          {
+                              ug79_pulse_timer->stop();
+                              chiaki_controller_state_set_idle(&ug79_automation_state);
+                              if(connected)
+                                  SendFeedbackState();
+                              client->write("STOPPED\n");
+                          }
+                          else
+                          {
+                              uint32_t button = 0;
+                              if(command == "UP") button = CHIAKI_CONTROLLER_BUTTON_DPAD_UP;
+                              else if(command == "DOWN") button = CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
+                              else if(command == "LEFT") button = CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT;
+                              else if(command == "RIGHT") button = CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT;
+                              else if(command == "CROSS") button = CHIAKI_CONTROLLER_BUTTON_CROSS;
+                              else if(command == "CIRCLE") button = CHIAKI_CONTROLLER_BUTTON_MOON;
+                              else if(command == "SQUARE") button = CHIAKI_CONTROLLER_BUTTON_BOX;
+                              else if(command == "TRIANGLE") button = CHIAKI_CONTROLLER_BUTTON_PYRAMID;
+                              else if(command == "L1") button = CHIAKI_CONTROLLER_BUTTON_L1;
+                              else if(command == "R1") button = CHIAKI_CONTROLLER_BUTTON_R1;
+                              else if(command == "L3") button = CHIAKI_CONTROLLER_BUTTON_L3;
+                              else if(command == "R3") button = CHIAKI_CONTROLLER_BUTTON_R3;
+                              else if(command == "OPTIONS") button = CHIAKI_CONTROLLER_BUTTON_OPTIONS;
+                              else if(command == "SHARE") button = CHIAKI_CONTROLLER_BUTTON_SHARE;
+
+                              // Timed analogue controls: MOVE/LOOK DIRECTION DURATION_MS.
+                              bool is_analog = false;
+                              bool duration_valid = true;
+                              int duration_ms = 150;
+                              ChiakiControllerState next;
+                              chiaki_controller_state_set_idle(&next);
+                              const auto parts = command.split(' ');
+                              if(parts.size() == 3 && (parts.at(0) == "MOVE" || parts.at(0) == "LOOK"))
+                              {
+                                  bool parsed = false;
+                                  duration_ms = parts.at(2).toInt(&parsed);
+                                  duration_valid = parsed && duration_ms >= 50 && duration_ms <= 2000;
+                                  const QByteArray direction = parts.at(1);
+                                  const int16_t stick = 22000;
+                                  const int16_t diagonal = 15556;
+                                  if(parts.at(0) == "MOVE")
+                                  {
+                                      if(direction == "FORWARD") { next.left_y = -stick; is_analog = true; }
+                                      else if(direction == "BACK") { next.left_y = stick; is_analog = true; }
+                                      else if(direction == "LEFT") { next.left_x = -stick; is_analog = true; }
+                                      else if(direction == "RIGHT") { next.left_x = stick; is_analog = true; }
+                                      else if(direction == "FORWARD-LEFT") { next.left_y = -diagonal; next.left_x = -diagonal; is_analog = true; }
+                                      else if(direction == "FORWARD-RIGHT") { next.left_y = -diagonal; next.left_x = diagonal; is_analog = true; }
+                                      else if(direction == "BACK-LEFT") { next.left_y = diagonal; next.left_x = -diagonal; is_analog = true; }
+                                      else if(direction == "BACK-RIGHT") { next.left_y = diagonal; next.left_x = diagonal; is_analog = true; }
+                                  }
+                                  else
+                                  {
+                                      if(direction == "UP") { next.right_y = -stick; is_analog = true; }
+                                      else if(direction == "DOWN") { next.right_y = stick; is_analog = true; }
+                                      else if(direction == "LEFT") { next.right_x = -stick; is_analog = true; }
+                                      else if(direction == "RIGHT") { next.right_x = stick; is_analog = true; }
+                                  }
+                              }
+
+                              if(button == 0 && !is_analog)
+                                  client->write("ERR unknown command\n");
+                              else if(!duration_valid)
+                                  client->write("ERR duration must be 50..2000ms\n");
+                              else if(!connected)
+                                  client->write("ERR not connected\n");
+                              else if(ug79_pulse_timer->isActive())
+                                  client->write("ERR busy\n");
+                              else
+                              {
+                                  ug79_automation_state = next;
+                                  ug79_automation_state.buttons = button;
+                                  SendFeedbackState();
+                                  ug79_pulse_timer->start(duration_ms);
+                                  client->write("OK ");
+                                  client->write(command);
+                                  client->write(QByteArray(" ") + QByteArray::number(duration_ms) + "ms\n");
+                              }
+                          }
+                          client->disconnectFromHost();
+                      });
+                  }
+              });
+              if(ug79_server->listen(QHostAddress::LocalHost, 39777))
+                  qInfo() << "Controller probe listening on 127.0.0.1:39777";
+              else
+                  qWarning() << "Controller probe unavailable:" << ug79_server->errorString();
+
+          '''
+
+          cpp = change(
+              cpp,
+              '\tStartAudioOutDrainThread();\n}',
+              '\tStartAudioOutDrainThread();\n' + server_code + '}',
+              1, 'StreamSession constructor tail',
+          )
+          cmake = change(
+              cmake,
+              'find_package(Qt6 REQUIRED COMPONENTS Core Gui Concurrent Svg Qml Quick Widgets)',
+              'find_package(Qt6 REQUIRED COMPONENTS Core Gui Concurrent Svg Qml Quick Widgets Network)',
+              1, 'Qt package selection',
+          )
+          cmake = change(
+              cmake,
+              'target_link_libraries(chiaki Qt::Core Qt::Gui',
+              'target_link_libraries(chiaki Qt::Network Qt::Core Qt::Gui',
+              1, 'Qt Network linkage',
+          )
+          cpp_path.write_text(cpp, encoding='utf-8')
+          hpp_path.write_text(hpp, encoding='utf-8')
+          cmake_path.write_text(cmake, encoding='utf-8')
+          print('UG79 analogue local controller probe v4 injected into temporary build checkout.')
+          PY
+
+      - name: Build libplacebo
+        run: |
+          scripts/build-libplacebo-windows.sh
+        env:
+          LIBPLACEBO_VERSION: ${{ github.event.inputs.libplacebo_version }}
+
+      - name: Setup FFmpeg
+        run: |
+          curl -LO https://github.com/streetpea/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip
+          unzip ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip
+          cp -a "ffmpeg-n7.1-latest-win64-gpl-shared-7.1/bin/." /mingw64/bin
+          cp -a "ffmpeg-n7.1-latest-win64-gpl-shared-7.1/include/." /mingw64/include
+          cp -a "ffmpeg-n7.1-latest-win64-gpl-shared-7.1/lib/." /mingw64/lib
+
+      - name: Build SDL2 compatibility layer
+        run: |
+          INSTALL_PREFIX=/mingw64 scripts/build-sdl2-compat.sh .
+          cp /mingw64/lib/pkgconfig/sdl2-compat.pc /mingw64/lib/pkgconfig/sdl2.pc
+
+      - name: Configure Chiaki-ng
+        run: |
+          cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCHIAKI_ENABLE_CLI=OFF -DCHIAKI_ENABLE_STEAMDECK_NATIVE=OFF
+
+      - name: Build Chiaki-ng
+        run: |
+          cmake --build build --config Release --clean-first --target chiaki
+
+      - name: Deploy portable Chiaki-ng
+        run: |
+          ./scripts/deploy-windows-msys2.sh chiaki-ng-Win build/gui/chiaki.exe "${{ github.workspace }}/build/third-party/cpp-steam-tools" /mingw64 gui/src/qml
+
+      - name: Add AMD Vulkan workaround launcher
+        run: |
+          printf '@echo off\r\nset "VK_LOADER_DRIVERS_DISABLE=*dzn*"\r\nstart "" "%%~dp0chiaki.exe"\r\n' > chiaki-ng-Win/Launch-UG79.cmd
+
+      - name: Package portable prototype
+        run: |
+          zip -r chiaki-ng-UG79-PS4-analogue-v4-win64.zip chiaki-ng-Win
+
+      - name: Upload portable prototype
+        uses: actions/upload-artifact@v4
+        with:
+          name: chiaki-ng-UG79-PS4-analogue-v4-win64
+          path: chiaki-ng-UG79-PS4-analogue-v4-win64.zip
+          if-no-files-found: error
+          retention-days: 7
