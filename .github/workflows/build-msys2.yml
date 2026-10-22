@@ -114,70 +114,90 @@ jobs:
               2, 'both controller send paths',
           )
           
-          server_code = r'''	// UG79 prototype: local-only controller injection. No external network exposure.
-          	// Only DOWN, STOP and PING are understood; a press releases after 150 ms.
-          	auto *ug79_pulse_timer = new QTimer(this);
-          	ug79_pulse_timer->setSingleShot(true);
-          	connect(ug79_pulse_timer, &QTimer::timeout, this, [this]() {
-          		ug79_automation_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
-          		if(connected)
-          			SendFeedbackState();
-          	});
           
-          	auto *ug79_server = new QTcpServer(this);
-          	connect(ug79_server, &QTcpServer::newConnection, this,
-          		[this, ug79_server, ug79_pulse_timer]() {
-          		while(ug79_server->hasPendingConnections())
-          		{
-          			auto *client = ug79_server->nextPendingConnection();
-          			client->setReadBufferSize(64);
-          			connect(client, &QTcpSocket::disconnected, client, &QObject::deleteLater);
-          			connect(client, &QTcpSocket::readyRead, this,
-          				[this, client, ug79_pulse_timer]() {
-          				if(client->bytesAvailable() > 32)
-          				{
-          					client->write("ERR command too long\n");
-          					client->disconnectFromHost();
-          					return;
-          				}
-          				if(!client->canReadLine())
-          					return;
-          				const QByteArray command = client->readLine(33).trimmed().toUpper();
-          				if(command == "PING")
-          					client->write(connected ? "READY\n" : "NOT_CONNECTED\n");
-          				else if(command == "STOP")
-          				{
-          					ug79_pulse_timer->stop();
-          					ug79_automation_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
-          					if(connected)
-          						SendFeedbackState();
-          					client->write("STOPPED\n");
-          				}
-          				else if(command == "DOWN")
-          				{
-          					if(!connected)
-          						client->write("ERR not connected\n");
-          					else if(ug79_pulse_timer->isActive())
-          						client->write("ERR busy\n");
-          					else
-          					{
-          						ug79_automation_state.buttons |= CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
-          						SendFeedbackState();
-          						ug79_pulse_timer->start(150);
-          						client->write("OK DOWN 150ms\n");
-          					}
-          				}
-          				else
-          					client->write("ERR unknown command\n");
-          				client->disconnectFromHost();
-          			});
-          		}
-          	});
-          	if(ug79_server->listen(QHostAddress::LocalHost, 39777))
-          		qInfo() << "UG79 probe listening on 127.0.0.1:39777";
-          	else
-          		qWarning() << "UG79 probe unavailable:" << ug79_server->errorString();
+          server_code = r'''    // Local-only controller inputs, one 150ms press at a time.
+              auto *ug79_pulse_timer = new QTimer(this);
+              ug79_pulse_timer->setSingleShot(true);
+              connect(ug79_pulse_timer, &QTimer::timeout, this, [this]() {
+                  ug79_automation_state.buttons = 0;
+                  if(connected)
+                      SendFeedbackState();
+              });
+
+              auto *ug79_server = new QTcpServer(this);
+              connect(ug79_server, &QTcpServer::newConnection, this,
+                  [this, ug79_server, ug79_pulse_timer]() {
+                  while(ug79_server->hasPendingConnections())
+                  {
+                      auto *client = ug79_server->nextPendingConnection();
+                      client->setReadBufferSize(64);
+                      connect(client, &QTcpSocket::disconnected, client, &QObject::deleteLater);
+                      connect(client, &QTcpSocket::readyRead, this,
+                          [this, client, ug79_pulse_timer]() {
+                          if(client->bytesAvailable() > 32)
+                          {
+                              client->write("ERR command too long\n");
+                              client->disconnectFromHost();
+                              return;
+                          }
+                          if(!client->canReadLine())
+                              return;
+                          const QByteArray command = client->readLine(33).trimmed().toUpper();
+                          if(command == "PING")
+                              client->write(connected ? "READY\n" : "NOT_CONNECTED\n");
+                          else if(command == "STOP")
+                          {
+                              ug79_pulse_timer->stop();
+                              ug79_automation_state.buttons = 0;
+                              if(connected)
+                                  SendFeedbackState();
+                              client->write("STOPPED\n");
+                          }
+                          else
+                          {
+                              uint32_t button = 0;
+                              if(command == "UP") button = CHIAKI_CONTROLLER_BUTTON_DPAD_UP;
+                              else if(command == "DOWN") button = CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
+                              else if(command == "LEFT") button = CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT;
+                              else if(command == "RIGHT") button = CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT;
+                              else if(command == "CROSS") button = CHIAKI_CONTROLLER_BUTTON_CROSS;
+                              else if(command == "CIRCLE") button = CHIAKI_CONTROLLER_BUTTON_MOON;
+                              else if(command == "SQUARE") button = CHIAKI_CONTROLLER_BUTTON_BOX;
+                              else if(command == "TRIANGLE") button = CHIAKI_CONTROLLER_BUTTON_PYRAMID;
+                              else if(command == "L1") button = CHIAKI_CONTROLLER_BUTTON_L1;
+                              else if(command == "R1") button = CHIAKI_CONTROLLER_BUTTON_R1;
+                              else if(command == "L3") button = CHIAKI_CONTROLLER_BUTTON_L3;
+                              else if(command == "R3") button = CHIAKI_CONTROLLER_BUTTON_R3;
+                              else if(command == "OPTIONS") button = CHIAKI_CONTROLLER_BUTTON_OPTIONS;
+                              else if(command == "SHARE") button = CHIAKI_CONTROLLER_BUTTON_SHARE;
+
+                              if(button == 0)
+                                  client->write("ERR unknown command\n");
+                              else if(!connected)
+                                  client->write("ERR not connected\n");
+                              else if(ug79_pulse_timer->isActive())
+                                  client->write("ERR busy\n");
+                              else
+                              {
+                                  ug79_automation_state.buttons = button;
+                                  SendFeedbackState();
+                                  ug79_pulse_timer->start(150);
+                                  client->write("OK ");
+                                  client->write(command);
+                                  client->write(" 150ms\n");
+                              }
+                          }
+                          client->disconnectFromHost();
+                      });
+                  }
+              });
+              if(ug79_server->listen(QHostAddress::LocalHost, 39777))
+                  qInfo() << "Controller probe listening on 127.0.0.1:39777";
+              else
+                  qWarning() << "Controller probe unavailable:" << ug79_server->errorString();
+
           '''
+
           
           cpp = change(
               cpp,
