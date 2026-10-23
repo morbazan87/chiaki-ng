@@ -1,4 +1,4 @@
-name: Build Chiaki-ng Windows - Minecraft action controller probe v5
+name: Build Chiaki-ng Windows - Minecraft variable-duration controller v6
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-windows_x64-msys2:
-    name: Build Windows x64 portable Minecraft controls v5
+    name: Build Windows x64 portable Minecraft controls v6
     runs-on: windows-latest
     defaults:
       run:
@@ -69,7 +69,7 @@ jobs:
           pip install protobuf
           pacman -S git make unzip zip --noconfirm
 
-      - name: Apply local controller probe v4 (temporary build checkout only)
+      - name: Apply local controller probe v6 (temporary build checkout only)
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -112,9 +112,11 @@ jobs:
               2, 'both controller send paths',
           )
 
-          server_code = r'''    // Build #4: loopback-only controller automation; timed automatic neutral release.
+          server_code = r'''    // Build #6: localhost-only controller automation with adjustable press duration.
+              // Every command automatically releases its input when the timer expires.
               auto *ug79_pulse_timer = new QTimer(this);
               ug79_pulse_timer->setSingleShot(true);
+              ug79_pulse_timer->setTimerType(Qt::PreciseTimer);
               connect(ug79_pulse_timer, &QTimer::timeout, this, [this]() {
                   chiaki_controller_state_set_idle(&ug79_automation_state);
                   if(connected)
@@ -152,52 +154,59 @@ jobs:
                           }
                           else
                           {
+                              const auto parts = command.split(' ');
+                              const QByteArray action = parts.at(0);
                               uint32_t button = 0;
-                              // Physical PS4 commands are preserved; these Minecraft action
-                              // aliases make the gameplay meaning explicit.
-                              if(command == "UP" || command == "PERSPECTIVE") button = CHIAKI_CONTROLLER_BUTTON_DPAD_UP;
-                              else if(command == "DOWN" || command == "DROP") button = CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
-                              else if(command == "LEFT" || command == "EMOTE") button = CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT;
-                              else if(command == "RIGHT" || command == "CHAT") button = CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT;
-                              else if(command == "CROSS" || command == "JUMP") button = CHIAKI_CONTROLLER_BUTTON_CROSS;
-                              else if(command == "CIRCLE" || command == "SNEAK") button = CHIAKI_CONTROLLER_BUTTON_MOON;
-                              else if(command == "SQUARE" || command == "CRAFT") button = CHIAKI_CONTROLLER_BUTTON_BOX;
-                              else if(command == "TRIANGLE" || command == "INVENTORY") button = CHIAKI_CONTROLLER_BUTTON_PYRAMID;
-                              else if(command == "L1" || command == "HOTBAR_PREV") button = CHIAKI_CONTROLLER_BUTTON_L1;
-                              else if(command == "R1" || command == "HOTBAR_NEXT") button = CHIAKI_CONTROLLER_BUTTON_R1;
-                              else if(command == "L3" || command == "SPRINT") button = CHIAKI_CONTROLLER_BUTTON_L3;
-                              else if(command == "R3" || command == "FLY_DOWN_SLOW") button = CHIAKI_CONTROLLER_BUTTON_R3;
-                              else if(command == "OPTIONS" || command == "PAUSE") button = CHIAKI_CONTROLLER_BUTTON_OPTIONS;
-                              else if(command == "SHARE") button = CHIAKI_CONTROLLER_BUTTON_SHARE;
-                              else if(command == "TOUCHPAD" || command == "SOCIAL") button = CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-                              // L2 and R2 are analogue trigger fields, not button bit flags.
+                              // Retain all Build #5 raw commands and gameplay aliases.
+                              if(action == "UP" || action == "PERSPECTIVE") button = CHIAKI_CONTROLLER_BUTTON_DPAD_UP;
+                              else if(action == "DOWN" || action == "DROP") button = CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
+                              else if(action == "LEFT" || action == "EMOTE") button = CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT;
+                              else if(action == "RIGHT" || action == "CHAT") button = CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT;
+                              else if(action == "CROSS" || action == "JUMP") button = CHIAKI_CONTROLLER_BUTTON_CROSS;
+                              else if(action == "CIRCLE" || action == "SNEAK") button = CHIAKI_CONTROLLER_BUTTON_MOON;
+                              else if(action == "SQUARE" || action == "CRAFT") button = CHIAKI_CONTROLLER_BUTTON_BOX;
+                              else if(action == "TRIANGLE" || action == "INVENTORY") button = CHIAKI_CONTROLLER_BUTTON_PYRAMID;
+                              else if(action == "L1" || action == "HOTBAR_PREV") button = CHIAKI_CONTROLLER_BUTTON_L1;
+                              else if(action == "R1" || action == "HOTBAR_NEXT") button = CHIAKI_CONTROLLER_BUTTON_R1;
+                              else if(action == "L3" || action == "SPRINT") button = CHIAKI_CONTROLLER_BUTTON_L3;
+                              else if(action == "R3" || action == "FLY_DOWN_SLOW") button = CHIAKI_CONTROLLER_BUTTON_R3;
+                              else if(action == "OPTIONS" || action == "PAUSE") button = CHIAKI_CONTROLLER_BUTTON_OPTIONS;
+                              else if(action == "SHARE") button = CHIAKI_CONTROLLER_BUTTON_SHARE;
+                              else if(action == "TOUCHPAD" || action == "SOCIAL") button = CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
 
-                              // Timed analogue controls: MOVE/LOOK DIRECTION DURATION_MS.
                               bool is_analog = false;
                               bool duration_valid = true;
-                              int duration_ms = 150;
+                              int duration_ms = 150; // Backwards-compatible default.
                               ChiakiControllerState next;
                               chiaki_controller_state_set_idle(&next);
-                              if(command == "L2" || command == "PLACE" || command == "USE")
+                              if(action == "L2" || action == "PLACE" || action == "USE")
                               {
                                   next.l2_state = 255;
                                   is_analog = true;
                               }
-                              else if(command == "R2" || command == "BREAK" || command == "ATTACK")
+                              else if(action == "R2" || action == "BREAK" || action == "ATTACK")
                               {
                                   next.r2_state = 255;
                                   is_analog = true;
                               }
-                              const auto parts = command.split(' ');
-                              if(parts.size() == 3 && (parts.at(0) == "MOVE" || parts.at(0) == "LOOK"))
+
+                              // All digital buttons and triggers accept optional milliseconds:
+                              // CROSS 25, RIGHT 100, L2 50, etc. One-word commands retain 150ms.
+                              if(parts.size() == 2 && action != "MOVE" && action != "LOOK")
+                              {
+                                  bool parsed = false;
+                                  duration_ms = parts.at(1).toInt(&parsed);
+                                  duration_valid = parsed && duration_ms > 0;
+                              }
+                              else if(parts.size() == 3 && (action == "MOVE" || action == "LOOK"))
                               {
                                   bool parsed = false;
                                   duration_ms = parts.at(2).toInt(&parsed);
-                                  duration_valid = parsed && duration_ms >= 50 && duration_ms <= 2000;
+                                  duration_valid = parsed && duration_ms > 0;
                                   const QByteArray direction = parts.at(1);
                                   const int16_t stick = 22000;
                                   const int16_t diagonal = 15556;
-                                  if(parts.at(0) == "MOVE")
+                                  if(action == "MOVE")
                                   {
                                       if(direction == "FORWARD") { next.left_y = -stick; is_analog = true; }
                                       else if(direction == "BACK") { next.left_y = stick; is_analog = true; }
@@ -216,11 +225,13 @@ jobs:
                                       else if(direction == "RIGHT") { next.right_x = stick; is_analog = true; }
                                   }
                               }
+                              else if(parts.size() != 1)
+                                  duration_valid = false;
 
                               if(button == 0 && !is_analog)
                                   client->write("ERR unknown command\n");
                               else if(!duration_valid)
-                                  client->write("ERR duration must be 50..2000ms\n");
+                                  client->write("ERR duration must be a positive integer in milliseconds\n");
                               else if(!connected)
                                   client->write("ERR not connected\n");
                               else if(ug79_pulse_timer->isActive())
@@ -268,7 +279,7 @@ jobs:
           cpp_path.write_text(cpp, encoding='utf-8')
           hpp_path.write_text(hpp, encoding='utf-8')
           cmake_path.write_text(cmake, encoding='utf-8')
-          print('UG79 analogue local controller probe v4 injected into temporary build checkout.')
+          print('UG79 variable-duration local controller probe v6 injected into temporary build checkout.')
           PY
 
       - name: Build libplacebo
@@ -308,12 +319,12 @@ jobs:
 
       - name: Package portable prototype
         run: |
-          zip -r chiaki-ng-minecraft-controls-v5-win64.zip chiaki-ng-Win
+          zip -r chiaki-ng-minecraft-controls-v6-win64.zip chiaki-ng-Win
 
       - name: Upload portable prototype
         uses: actions/upload-artifact@v4
         with:
-          name: chiaki-ng-minecraft-controls-v5-win64
-          path: chiaki-ng-minecraft-controls-v5-win64.zip
+          name: chiaki-ng-minecraft-controls-v6-win64
+          path: chiaki-ng-minecraft-controls-v6-win64.zip
           if-no-files-found: error
           retention-days: 7
