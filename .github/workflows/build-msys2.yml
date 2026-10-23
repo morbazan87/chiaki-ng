@@ -1,4 +1,4 @@
-name: Build Chiaki-ng Windows - Minecraft variable-duration controller v6
+name: Build Chiaki-ng Windows - Minecraft touchpad video calibration v7
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-windows_x64-msys2:
-    name: Build Windows x64 portable Minecraft controls v6
+    name: Build Windows x64 portable Minecraft touchpad calibration v7
     runs-on: windows-latest
     defaults:
       run:
@@ -69,7 +69,7 @@ jobs:
           pip install protobuf
           pacman -S git make unzip zip --noconfirm
 
-      - name: Apply local controller probe v6 (temporary build checkout only)
+      - name: Apply local controller probe v7 (temporary build checkout only)
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -90,29 +90,82 @@ jobs:
           hpp = change(
               hpp,
               '\t\tChiakiControllerState keyboard_state;',
-              '\t\tChiakiControllerState keyboard_state;\n\t\tChiakiControllerState ug79_automation_state;',
+              '\t\tChiakiControllerState keyboard_state;\n\t\tChiakiControllerState ug79_automation_state;\n\t\tChiakiControllerState ug79_touch_state;\n\t\tint8_t ug79_touch_id = -1;\n\t\tQMutex ug79_frame_mutex;\n\t\tbool ug79_frame_pending = false;\n\t\tQString ug79_frame_label;\n\t\tQString ug79_frame_result = QStringLiteral("NO_FRAME");',
               1, 'controller state declaration',
           )
           cpp = change(
               cpp,
               '#include <QKeyEvent>',
-              '#include <QKeyEvent>\n#include <QTcpServer>\n#include <QTcpSocket>\n#include <QHostAddress>\n#include <QDebug>',
+              '#include <QKeyEvent>\n#include <QTcpServer>\n#include <QTcpSocket>\n#include <QHostAddress>\n#include <QDebug>\n#include <QDir>\n#include <QDateTime>\n#include <QStandardPaths>',
               1, 'Qt Network headers',
           )
           cpp = change(
               cpp,
               '\tchiaki_controller_state_set_idle(&keyboard_state);',
-              '\tchiaki_controller_state_set_idle(&keyboard_state);\n\tchiaki_controller_state_set_idle(&ug79_automation_state);',
+              '\tchiaki_controller_state_set_idle(&keyboard_state);\n\tchiaki_controller_state_set_idle(&ug79_automation_state);\n\tchiaki_controller_state_set_idle(&ug79_touch_state);\n\tug79_touch_id = -1;',
               3, 'initial controller state',
           )
           cpp = change(
               cpp,
               '\tchiaki_controller_state_or(&state, &state, &touch_state);',
-              '\tchiaki_controller_state_or(&state, &state, &touch_state);\n\tchiaki_controller_state_or(&state, &state, &ug79_automation_state);',
+              '\tchiaki_controller_state_or(&state, &state, &touch_state);\n\tchiaki_controller_state_or(&state, &state, &ug79_automation_state);\n\tchiaki_controller_state_or(&state, &state, &ug79_touch_state);',
               2, 'both controller send paths',
           )
 
-          server_code = r'''    // Build #6: localhost-only controller automation with adjustable press duration.
+
+          hpp = change(
+              hpp,
+              '\t\tvoid HandleKeyboardEvent(QKeyEvent *event);',
+              '\t\tbool QueueCalibrationFrame(const QString &label);\n'
+              '\t\tbool TakeCalibrationFrameRequest(QString *label);\n'
+              '\t\tvoid SetCalibrationFrameResult(const QString &result);\n'
+              '\t\tQString GetCalibrationFrameResult();\n'
+              '\t\tvoid HandleKeyboardEvent(QKeyEvent *event);',
+              1, 'frame-request public methods',
+          )
+
+          frame_methods = r'''bool StreamSession::QueueCalibrationFrame(const QString &label)
+          {
+              QMutexLocker lock(&ug79_frame_mutex);
+              if(ug79_frame_pending)
+                  return false;
+              ug79_frame_label = label;
+              ug79_frame_pending = true;
+              ug79_frame_result = QStringLiteral("PENDING ") + label;
+              return true;
+          }
+
+          bool StreamSession::TakeCalibrationFrameRequest(QString *label)
+          {
+              QMutexLocker lock(&ug79_frame_mutex);
+              if(!ug79_frame_pending)
+                  return false;
+              *label = ug79_frame_label;
+              ug79_frame_pending = false;
+              return true;
+          }
+
+          void StreamSession::SetCalibrationFrameResult(const QString &result)
+          {
+              QMutexLocker lock(&ug79_frame_mutex);
+              ug79_frame_result = result;
+          }
+
+          QString StreamSession::GetCalibrationFrameResult()
+          {
+              QMutexLocker lock(&ug79_frame_mutex);
+              return ug79_frame_result;
+          }
+
+          '''
+          cpp = change(
+              cpp,
+              'void StreamSession::HandleKeyboardEvent(QKeyEvent *event)',
+              frame_methods + 'void StreamSession::HandleKeyboardEvent(QKeyEvent *event)',
+              1, 'frame capture request methods',
+          )
+
+          server_code = r'''    // Build #7: localhost-only controller automation with adjustable press duration.
               // Every command automatically releases its input when the timer expires.
               auto *ug79_pulse_timer = new QTimer(this);
               ug79_pulse_timer->setSingleShot(true);
@@ -148,9 +201,82 @@ jobs:
                           {
                               ug79_pulse_timer->stop();
                               chiaki_controller_state_set_idle(&ug79_automation_state);
+                              chiaki_controller_state_set_idle(&ug79_touch_state);
+                              ug79_touch_id = -1;
                               if(connected)
                                   SendFeedbackState();
                               client->write("STOPPED\n");
+                          }
+                          else if(command == "FRAME STATUS")
+                          {
+                              client->write(GetCalibrationFrameResult().toUtf8() + "\n");
+                          }
+                          else if(command.startsWith("FRAME "))
+                          {
+                              const QByteArray label = command.mid(6).trimmed();
+                              bool valid = !label.isEmpty() && label.size() <= 12;
+                              for(char c : label)
+                                  if(!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'))
+                                      valid = false;
+                              if(!connected)
+                                  client->write("ERR not connected\n");
+                              else if(!valid)
+                                  client->write("ERR label must be 1..12 letters, digits or underscores\n");
+                              else if(!QueueCalibrationFrame(QString::fromLatin1(label)))
+                                  client->write("ERR frame request pending\n");
+                              else
+                                  client->write("QUEUED " + label + "\n");
+                          }
+                          else if(command.startsWith("TOUCH "))
+                          {
+                              const auto touch_parts = command.split(' ');
+                              const QByteArray op = touch_parts.size() > 1 ? touch_parts.at(1) : QByteArray();
+                              if(!connected)
+                                  client->write("ERR not connected\n");
+                              else if(op == "STATUS" && touch_parts.size() == 2)
+                                  client->write(ug79_touch_id >= 0 ? "TOUCH ACTIVE\n" : "TOUCH RELEASED\n");
+                              else if(op == "END" && touch_parts.size() == 2)
+                              {
+                                  if(ug79_touch_id >= 0)
+                                      chiaki_controller_state_stop_touch(&ug79_touch_state, (uint8_t)ug79_touch_id);
+                                  ug79_touch_id = -1;
+                                  SendFeedbackState();
+                                  client->write("TOUCH RELEASED\n");
+                              }
+                              else if((op == "BEGIN" || op == "MOVE") && touch_parts.size() == 4)
+                              {
+                                  bool ok_x = false, ok_y = false;
+                                  const int x = touch_parts.at(2).toInt(&ok_x);
+                                  const int y = touch_parts.at(3).toInt(&ok_y);
+                                  if(!ok_x || !ok_y || x < 0 || y < 0 || x > (int)PS_TOUCHPAD_MAX_X || y > (int)PS_TOUCHPAD_MAX_Y)
+                                      client->write("ERR touch coordinates outside touchpad\n");
+                                  else if(op == "BEGIN")
+                                  {
+                                      if(ug79_touch_id >= 0)
+                                          client->write("ERR touch already held (use MOVE or END)\n");
+                                      else
+                                      {
+                                          ug79_touch_id = chiaki_controller_state_start_touch(&ug79_touch_state, (uint16_t)x, (uint16_t)y);
+                                          if(ug79_touch_id < 0)
+                                              client->write("ERR no free touch slot\n");
+                                          else
+                                          {
+                                              SendFeedbackState();
+                                              client->write("TOUCH HELD\n");
+                                          }
+                                      }
+                                  }
+                                  else if(ug79_touch_id < 0)
+                                      client->write("ERR touch not held (use BEGIN)\n");
+                                  else
+                                  {
+                                      chiaki_controller_state_set_touch_pos(&ug79_touch_state, (uint8_t)ug79_touch_id, (uint16_t)x, (uint16_t)y);
+                                      SendFeedbackState();
+                                      client->write("TOUCH MOVED\n");
+                                  }
+                              }
+                              else
+                                  client->write("ERR use TOUCH BEGIN x y, TOUCH MOVE x y, TOUCH END, TOUCH STATUS\n");
                           }
                           else
                           {
@@ -276,10 +402,122 @@ jobs:
               'target_link_libraries(chiaki Qt::Network Qt::Core Qt::Gui',
               1, 'Qt Network linkage',
           )
+          # Colour conversion for on-demand decoded-frame snapshots.
+          cmake += '\n# Build 7: decoded-frame RGB conversion for keyboard calibration\n'
+          cmake += 'find_package(PkgConfig REQUIRED)\n'
+          cmake += 'pkg_check_modules(UG79_SWSCALE REQUIRED IMPORTED_TARGET libswscale)\n'
+          cmake += 'target_link_libraries(chiaki PkgConfig::UG79_SWSCALE)\n'
+
+          # Video is captured from the decoded AVFrame only on explicit FRAME request.
+          backend_path = Path('gui/src/qmlbackend.cpp')
+          backend = backend_path.read_text(encoding='utf-8')
+          backend = change(
+              backend,
+              '#include <QImageReader>',
+              '#include <QImageReader>\n#include <QDir>\n#include <QDateTime>\n#include <QStandardPaths>\n#include <QFile>\n#include <algorithm>',
+              1, 'capture Qt includes',
+          )
+          backend = change(
+              backend,
+              '#include <libavutil/pixfmt.h>',
+              '#include <libavutil/pixfmt.h>\n#include <libswscale/swscale.h>\n#include <libavutil/hwcontext.h>',
+              1, 'capture FFmpeg includes',
+          )
+          image_capture = r'''// Build 7: capture a real decoded video frame only when requested.
+          // Never capture continuously or upload images; user-labelled local evidence.
+          static QString Ug79SaveCalibrationFrame(AVFrame *frame, const QString &label)
+          {
+              if(!frame || frame->width <= 0 || frame->height <= 0)
+                  return QStringLiteral("ERR invalid decoder frame");
+              AVFrame *cpu = nullptr;
+              AVFrame *src = frame;
+              if(frame->hw_frames_ctx)
+              {
+                  cpu = av_frame_alloc();
+                  if(!cpu || av_hwframe_transfer_data(cpu, frame, 0) < 0)
+                  {
+                      av_frame_free(&cpu);
+                      return QStringLiteral("ERR hardware frame transfer failed");
+                  }
+                  src = cpu;
+              }
+              if(!src->data[0])
+              {
+                  av_frame_free(&cpu);
+                  return QStringLiteral("ERR frame has no readable planes");
+              }
+              const int width = std::min(src->width, 1280);
+              const int height = std::max(1, (src->height * width) / src->width);
+              QImage img(width, height, QImage::Format_RGB888);
+              if(img.isNull())
+              {
+                  av_frame_free(&cpu);
+                  return QStringLiteral("ERR image allocation failed");
+              }
+              SwsContext *ctx = sws_getContext(src->width, src->height,
+                  static_cast<AVPixelFormat>(src->format), width, height,
+                  AV_PIX_FMT_RGB24, SWS_BILINEAR, nullptr, nullptr, nullptr);
+              if(!ctx)
+              {
+                  av_frame_free(&cpu);
+                  return QStringLiteral("ERR unsupported pixel format");
+              }
+              uint8_t *dst[4] = {img.bits(), nullptr, nullptr, nullptr};
+              int dstStride[4] = {static_cast<int>(img.bytesPerLine()), 0, 0, 0};
+              const int converted = sws_scale(ctx, src->data, src->linesize, 0, src->height, dst, dstStride);
+              sws_freeContext(ctx);
+              av_frame_free(&cpu);
+              if(converted != height)
+                  return QStringLiteral("ERR incomplete frame conversion");
+              const QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+              if(base.isEmpty())
+                  return QStringLiteral("ERR application data directory unavailable");
+              QDir dir(base);
+              if(!dir.mkpath(QStringLiteral("keyboard-calibration")) ||
+                 !dir.cd(QStringLiteral("keyboard-calibration")))
+                  return QStringLiteral("ERR cannot create calibration directory");
+              const QString now = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss_zzz"));
+              const QString filename = QStringLiteral("%1_%2.png").arg(label, now);
+              const QString target = dir.filePath(filename);
+              if(!img.save(target, "PNG"))
+                  return QStringLiteral("ERR cannot save PNG");
+              QFile ledger(dir.filePath(QStringLiteral("samples.csv")));
+              if(ledger.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+              {
+                  if(ledger.size() == 0)
+                      ledger.write("timestamp,label,filename,width,height\n");
+                  ledger.write(QStringLiteral("%1,%2,%3,%4,%5\n")
+                       .arg(now, label, filename)
+                       .arg(width).arg(height).toUtf8());
+                  ledger.close();
+              }
+              return QStringLiteral("SAVED ") + target;
+          }
+
+          '''
+          backend = change(
+              backend,
+              'static bool detailedVerboseTelemetryEnabled()',
+              image_capture + 'static bool detailedVerboseTelemetryEnabled()',
+              1, 'on-demand decoded frame helper',
+          )
+          backend = change(
+              backend,
+              '        const qint64 prepare_end_us = static_cast<qint64>(chiaki_time_now_monotonic_us());',
+              '        QString ug79_capture_label;\n'
+              '        if(session->TakeCalibrationFrameRequest(&ug79_capture_label)) {\n'
+              '            const QString capture_result = Ug79SaveCalibrationFrame(frame.frame, ug79_capture_label);\n'
+              '            session->SetCalibrationFrameResult(capture_result);\n'
+              '            qCInfo(chiakiGui) << "Keyboard calibration frame:" << capture_result;\n'
+              '        }\n'
+              '        const qint64 prepare_end_us = static_cast<qint64>(chiaki_time_now_monotonic_us());',
+              1, 'on-demand frame interception',
+          )
+          backend_path.write_text(backend, encoding='utf-8')
           cpp_path.write_text(cpp, encoding='utf-8')
           hpp_path.write_text(hpp, encoding='utf-8')
           cmake_path.write_text(cmake, encoding='utf-8')
-          print('UG79 variable-duration local controller probe v6 injected into temporary build checkout.')
+          print('UG79 touchpad + decoded-video keyboard calibration v7 injected into temporary build checkout.')
           PY
 
       - name: Build libplacebo
@@ -319,12 +557,12 @@ jobs:
 
       - name: Package portable prototype
         run: |
-          zip -r chiaki-ng-minecraft-controls-v6-win64.zip chiaki-ng-Win
+          zip -r chiaki-ng-minecraft-controls-v7-win64.zip chiaki-ng-Win
 
       - name: Upload portable prototype
         uses: actions/upload-artifact@v4
         with:
-          name: chiaki-ng-minecraft-controls-v6-win64
-          path: chiaki-ng-minecraft-controls-v6-win64.zip
+          name: chiaki-ng-minecraft-controls-v7-win64
+          path: chiaki-ng-minecraft-controls-v7-win64.zip
           if-no-files-found: error
           retention-days: 7
