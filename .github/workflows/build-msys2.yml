@@ -1,4 +1,4 @@
-name: Build Chiaki-ng Windows - Minecraft touchpad video calibration v7
+name: Build Chiaki-ng Windows - PSN Keyboard Diagnostics v1
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-windows_x64-msys2:
-    name: Build Windows x64 portable Minecraft touchpad calibration v7
+    name: Build Windows x64 PSN Keyboard Diagnostics with Minecraft controls
     runs-on: windows-latest
     defaults:
       run:
@@ -520,6 +520,115 @@ jobs:
           print('UG79 touchpad + decoded-video keyboard calibration v7 injected into temporary build checkout.')
           PY
 
+      - name: Inject opt-in PSN keyboard diagnostics (temporary checkout only)
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('lib/src/ctrl.c')
+          s = path.read_text(encoding='utf-8')
+
+          def patch(before, after, description):
+              global s
+              matches = s.count(before)
+              if matches != 1:
+                  raise RuntimeError(f'KBPROBE {description}: expected one matching source fragment, found {matches}; refusing to build changed source')
+              s = s.replace(before, after, 1)
+              print('KBPROBE: verified and applied', description)
+
+          # Add a dedicated privacy-safe log: no packet payloads, keys, PSN IDs, or gameplay text.
+          patch('#include <stdio.h>\n', '#include <stdio.h>\n#include <time.h>\n', 'time include')
+          patch('static void ctrl_failed(ChiakiCtrl *ctrl, ChiakiQuitReason reason)\n{',
+          '''static void kbprobe_event(const char *message)
+          {
+              const char *filename = getenv("CHIAKI_KB_DIAG_LOG");
+              if(!filename || !filename[0])
+                  return;
+              FILE *out = fopen(filename, "a");
+              if(!out)
+                  return;
+              fprintf(out, "%lld %s\\n", (long long)time(NULL), message);
+              fclose(out);
+          }
+
+          static void ctrl_failed(ChiakiCtrl *ctrl, ChiakiQuitReason reason)
+          {
+              kbprobe_event("CTRL_FAILED");''', 'private diagnostic logger')
+          patch('CHIAKI_LOGI(ctrl->session->log, "Ctrl connected");',
+                'CHIAKI_LOGI(ctrl->session->log, "Ctrl connected");\n\tkbprobe_event("CTRL_CONNECTED");', 'control channel connected')
+          patch('case CTRL_MESSAGE_TYPE_SESSION_ID:\n\t\t\tctrl_message_received_session_id(ctrl, payload, payload_size);',
+                'case CTRL_MESSAGE_TYPE_SESSION_ID:\n\t\t\tkbprobe_event("SESSION_ID_MESSAGE_RECEIVED");\n\t\t\tctrl_message_received_session_id(ctrl, payload, payload_size);', 'session-ID milestone')
+          patch('static void ctrl_message_received_switch_to_stream_connection(ChiakiCtrl *ctrl, uint8_t *payload, size_t payload_size)\n{',
+                'static void ctrl_message_received_switch_to_stream_connection(ChiakiCtrl *ctrl, uint8_t *payload, size_t payload_size)\n{\n\tkbprobe_event("STREAM_SWITCH_ACK_RECEIVED");', 'stream switch ack')
+          patch('static void ctrl_message_received_keyboard_open(ChiakiCtrl *ctrl, uint8_t *payload, size_t payload_size)\n{',
+                'static void ctrl_message_received_keyboard_open(ChiakiCtrl *ctrl, uint8_t *payload, size_t payload_size)\n{\n\tkbprobe_event("KEYBOARD_OPEN_MESSAGE_RECEIVED");', 'keyboard open milestone')
+          patch('static void ctrl_message_received_keyboard_text_change(ChiakiCtrl *ctrl, uint8_t *payload, size_t payload_size)\n{',
+                'static void ctrl_message_received_keyboard_text_change(ChiakiCtrl *ctrl, uint8_t *payload, size_t payload_size)\n{\n\tkbprobe_event("KEYBOARD_TEXT_RESPONSE_RECEIVED");', 'text response milestone')
+
+          # Fix an existing 8-bit PSN control-buffer length truncation. The 1192 byte
+          # diagnostic limit avoids attempting excessively large RUDP datagrams.
+          patch('''\t\tuint8_t buf_size = 8 + payload_size;
+          \t\tuint8_t buf[buf_size];''',
+          '''\t\tif(payload_size > 1192)
+          \t\t{
+          \t\t\tkbprobe_event("PSN_CONTROL_PAYLOAD_TOO_LARGE");
+          \t\t\tfree(enc);
+          \t\t\treturn CHIAKI_ERR_INVALID_DATA;
+          \t\t}
+          \t\tconst size_t buf_size = sizeof(header) + payload_size;
+          \t\tuint8_t *buf = malloc(buf_size);
+          \t\tif(!buf)
+          \t\t{
+          \t\t\tfree(enc);
+          \t\t\treturn CHIAKI_ERR_MEMORY;
+          \t\t}''', 'safe RUDP buffer allocation')
+          patch('''\t\terr = chiaki_rudp_send_ctrl_message(ctrl->session->rudp, buf, buf_size);
+          \t\tif(err != CHIAKI_ERR_SUCCESS)''',
+          '''\t\terr = chiaki_rudp_send_ctrl_message(ctrl->session->rudp, buf, buf_size);
+          \t\tfree(buf);
+          \t\tif(err != CHIAKI_ERR_SUCCESS)''', 'free RUDP buffer')
+
+          # Stage 1 experiment: send neither, only enable, only toggle, or both.
+          # Ordinary GUI code still configures enable_keyboard=false. No mode: no probe.
+          before = '''\tif(ctrl->session->connect_info.enable_keyboard)
+          \t{
+          \t\tCHIAKI_LOGI(ctrl->session->log, "Enabling Keyboard");
+          \t\t// TODO: Signature ?!
+          \t\tuint8_t enable = 1;
+          \t\tuint8_t signature[0x10] = { 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x05, 0xAE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+          \t\tctrl_message_send(ctrl, CTRL_MESSAGE_TYPE_KEYBOARD_ENABLE, signature, 0x10);
+          \t\tctrl_message_send(ctrl, CTRL_MESSAGE_TYPE_KEYBOARD_ENABLE_TOGGLE, &enable, 1);
+          \t}'''
+          after = '''\tconst char *kb_mode = getenv("CHIAKI_KB_PROBE");
+          \tconst bool probe_enable = kb_mode && (strcmp(kb_mode, "enable") == 0 || strcmp(kb_mode, "both") == 0);
+          \tconst bool probe_toggle = kb_mode && (strcmp(kb_mode, "toggle") == 0 || strcmp(kb_mode, "both") == 0);
+          \tif(kb_mode && strcmp(kb_mode, "off") == 0)
+          \t\tkbprobe_event("PROBE_OFF");
+          \tif(ctrl->session->connect_info.enable_keyboard || probe_enable || probe_toggle)
+          \t{
+          \t\tkbprobe_event("PROBE_PHASE_ENTERED");
+          \t\tuint8_t enable = 1;
+          \t\t// Upstream-provided value; signature meaning has not been established.
+          \t\tuint8_t signature[0x10] = { 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x05, 0xAE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+          \t\tif(ctrl->session->connect_info.enable_keyboard || probe_enable)
+          \t\t{
+          \t\t\tkbprobe_event("KEYBOARD_ENABLE_SEND_BEGIN");
+          \t\t\tChiakiErrorCode result = ctrl_message_send(ctrl, CTRL_MESSAGE_TYPE_KEYBOARD_ENABLE, signature, sizeof(signature));
+          \t\t\tkbprobe_event(result == CHIAKI_ERR_SUCCESS ? "KEYBOARD_ENABLE_SENT_TO_TRANSPORT" : "KEYBOARD_ENABLE_SEND_ERROR");
+          \t\t}
+          \t\tif(ctrl->session->connect_info.enable_keyboard || probe_toggle)
+          \t\t{
+          \t\t\tkbprobe_event("KEYBOARD_TOGGLE_SEND_BEGIN");
+          \t\t\tChiakiErrorCode result = ctrl_message_send(ctrl, CTRL_MESSAGE_TYPE_KEYBOARD_ENABLE_TOGGLE, &enable, 1);
+          \t\t\tkbprobe_event(result == CHIAKI_ERR_SUCCESS ? "KEYBOARD_TOGGLE_SENT_TO_TRANSPORT" : "KEYBOARD_TOGGLE_SEND_ERROR");
+          \t\t}
+          \t}'''
+          patch(before, after, 'isolated keyboard negotiation modes')
+
+          path.write_text(s, encoding='utf-8')
+          print('KBPROBE: source patch completed; no application or PSN changes performed at build time')
+          PY
+
       - name: Build libplacebo
         run: |
           scripts/build-libplacebo-windows.sh
@@ -555,14 +664,52 @@ jobs:
         run: |
           printf '@echo off\r\nset "VK_LOADER_DRIVERS_DISABLE=*dzn*"\r\nstart "" "%%~dp0chiaki.exe"\r\n' > chiaki-ng-Win/Launch-UG79.cmd
 
+      - name: Add explicit diagnostic launchers and safety notes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          folder = Path('chiaki-ng-Win')
+          folder.mkdir(exist_ok=True)
+          launchers = {
+              'Launch-KB-Observe.cmd': ('off', 'KBPROBE-Observe.log'),
+              'TEST-KB-Enable-RISK-Disconnect.cmd': ('enable', 'KBPROBE-Enable.log'),
+              'TEST-KB-Toggle-RISK-Disconnect.cmd': ('toggle', 'KBPROBE-Toggle.log'),
+              'TEST-KB-Both-RISK-Disconnect.cmd': ('both', 'KBPROBE-Both.log'),
+          }
+          for filename, (mode, logfile) in launchers.items():
+              commands = [
+                  '@echo off',
+                  'cd /d "%~dp0"',
+                  'set "VK_LOADER_DRIVERS_DISABLE=*dzn*"',
+                  f'set "CHIAKI_KB_PROBE={mode}"',
+                  f'set "CHIAKI_KB_DIAG_LOG=%~dp0{logfile}"',
+                  'start "" "%~dp0chiaki.exe"',
+              ]
+              (folder / filename).write_bytes(('\r\n'.join(commands) + '\r\n').encode('utf-8'))
+          (folder / 'READ-ME-KEYBOARD-TEST.txt').write_text(
+              'PSN KEYBOARD DIAGNOSTIC EXPERIMENT - NOT A WORKING DIRECT TYPING BUILD\n'
+              '1. Extract this portable ZIP to its own folder. Do not replace a working Chiaki folder.\n'
+              '2. Close other Chiaki windows before testing.\n'
+              '3. Launch-KB-Observe.cmd is the safe baseline. It sends NO keyboard negotiation messages.\n'
+              '4. The TEST-KB-* launchers deliberately send experimental messages and MAY DISCONNECT REMOTE PLAY.\n'
+              '5. Keyboard probes are disabled by default, and the Minecraft controller tools remain present.\n'
+              '6. Each launcher writes a separate KBPROBE-*.log file in this extracted folder.\n'
+              '7. Do not enable verbose packet dumps or publish credentials/tokens/session IDs.\n'
+              '8. A SENT_TO_TRANSPORT line is NOT proof that the PlayStation accepted a message.\n'
+              '9. Do not run any TEST-KB launcher unless you are prepared for possible disconnection.\n',
+              encoding='utf-8',
+          )
+          print('PSN keyboard experiment launchers generated.')
+          PY
+
       - name: Package portable prototype
         run: |
-          zip -r chiaki-ng-minecraft-controls-v7-win64.zip chiaki-ng-Win
+          zip -r chiaki-ng-PSN-keyboard-diagnostics-v1-win64.zip chiaki-ng-Win
 
       - name: Upload portable prototype
         uses: actions/upload-artifact@v4
         with:
-          name: chiaki-ng-minecraft-controls-v7-win64
-          path: chiaki-ng-minecraft-controls-v7-win64.zip
+          name: chiaki-ng-PSN-keyboard-diagnostics-v1-win64
+          path: chiaki-ng-PSN-keyboard-diagnostics-v1-win64.zip
           if-no-files-found: error
           retention-days: 7
