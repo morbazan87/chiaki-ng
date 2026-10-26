@@ -1312,7 +1312,7 @@ jobs:
               '9. Do not run any TEST-KB launcher unless you are prepared for possible disconnection.\n'
               '10. v2: TEST-Native-Text-v2.cmd opens an opt-in Windows text dialog when PS4 sends KEYBOARD_OPEN.\n'
               '11. v2: First click Send Text with hello123 and inspect Minecraft; then click Accept / Done.\n'
-              '12. v2: The text content is never placed in KBPROBE diagnostic logs.\n',
+              '12. v2: The text content is never placed in KBPROBE diagnostic logs.\n'
               '13. v3: TEST-Native-Batch-v3.cmd opens a bounded queued command dialog when PS4 keyboard first opens.\n'
               '14. Open Minecraft chat and keyboard manually once; paste one slash-command per line, then click Start Batch.\n'
               '15. v3 sends each command, awaits PS4 text response, accepts, awaits close, then taps RIGHT and CROSS to reopen.\n'
