@@ -1,4 +1,4 @@
-name: Build Chiaki-ng Windows - PSN Native Text Diagnostics v2
+name: Build Chiaki-ng Windows - PSN Native Batch Diagnostics v3
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-windows_x64-msys2:
-    name: Build Windows x64 PSN Native Text v2 with Minecraft controls
+    name: Build Windows x64 PSN Native Batch v3 with Minecraft controls
     runs-on: windows-latest
     defaults:
       run:
@@ -853,6 +853,392 @@ jobs:
           print('Native Keyboard v2 source patches complete; experimental PSN input is opt-in.')
           PY
 
+      - name: Inject opt-in bounded native keyboard batch automation v3 (temporary checkout)
+        run: |
+          python - <<'PY'
+          #!/usr/bin/env python3
+          # Opt-in queued Minecraft command automation atop Build #7 + Native Keyboard v2.
+          # Patch order: controller v7, KBPROBE v1, native keyboard v2, THIS patch.
+          # Only changes GitHub Actions temporary checkout.
+          from pathlib import Path
+          import re
+
+          cpp_path = Path('gui/src/streamsession.cpp')
+          header_path = Path('gui/include/streamsession.h')
+          cpp = cpp_path.read_text(encoding='utf-8')
+          hpp = header_path.read_text(encoding='utf-8')
+
+          def replace_once(src, old, new, label):
+              count = src.count(old)
+              if count == 1:
+                  print('NativeKB v3 exact source verified:', label)
+                  return src.replace(old, new, 1)
+              if count != 0:
+                  raise RuntimeError(f'NativeKB v3 {label}: ambiguous exact anchor, found {count}')
+              # v2 inserts raw C++ into a YAML Python block: YAML strips a common indent.
+              # Accept ONLY a unique match with the same complete non-whitespace source lines.
+              parts = old.splitlines(keepends=True)
+              expression = ''
+              for part in parts:
+                  has_newline = part.endswith('\n')
+                  content = part.rstrip('\r\n').strip()
+                  if not content:
+                      expression += r'^[ \t]*' + ('\n' if has_newline else '')
+                  else:
+                      expression += r'^[ \t]*' + re.escape(content) + ('\n' if has_newline else '')
+              matches = list(re.finditer(expression, src, re.MULTILINE))
+              if len(matches) != 1:
+                  raise RuntimeError(f'NativeKB v3 {label}: expected 1 whitespace-normalized source anchor, found {len(matches)}')
+              m = matches[0]
+              print('NativeKB v3 indentation-normalized source verified:', label)
+              return src[:m.start()] + new + src[m.end():]
+
+          hpp = replace_once(hpp, '#include <QDialog>',
+              '#include <QDialog>\n#include <QLabel>\n#include <QStringList>', 'header Qt includes')
+          hpp = replace_once(hpp, 'QPointer<QDialog> ug79_native_kb_dialog;', '''QPointer<QDialog> ug79_native_kb_dialog;
+          		// v3 bounded queue; state lives across PS4 keyboard open/close cycles.
+          		QPointer<QLabel> ug79_batch_status;
+          		QStringList ug79_batch_commands;
+          		int ug79_batch_index = 0;
+          		int ug79_batch_phase = 0; // 0 idle, 1 open, 2 reply, 3 close, 4 accept pending, 5 next-cycle delay
+          		bool ug79_batch_active = false;
+          		bool ug79_batch_keyboard_open = false;
+          		quint64 ug79_batch_stage_token = 0;''', 'queue state')
+          hpp = replace_once(hpp, 'void Event(ChiakiEvent *event);', '''void Ug79BatchStop(const QString &reason);
+          		void Ug79BatchSetPhase(int phase, int timeout_ms);
+          		void Ug79BatchSendCurrent();
+          		void Ug79BatchOnReply(const QString &text);
+          		void Ug79BatchOnClose();
+          		void Ug79BatchReopen();
+          		void Event(ChiakiEvent *event);''', 'batch method declarations')
+          cpp = replace_once(cpp, '#include <QPointer>',
+              '#include <QPointer>\n#include <QPlainTextEdit>\n#include <QSpinBox>\n#include <QStringList>', 'GUI batch includes')
+
+          methods = r'''// Native keyboard v3: bounded, stop-on-error queued text entry. GUI thread only.
+          void StreamSession::Ug79BatchStop(const QString &reason)
+          {
+              ++ug79_batch_stage_token; // Invalidate outstanding timeouts and controller pulses.
+              const bool was_active = ug79_batch_active;
+              ug79_batch_active = false;
+              ug79_batch_phase = 0;
+              chiaki_controller_state_set_idle(&ug79_automation_state);
+              if(connected)
+                  SendFeedbackState();
+              if(ug79_batch_status)
+                  ug79_batch_status->setText(reason);
+              if(was_active)
+                  ug79KbV2Log("KB_V3_BATCH_STOPPED");
+          }
+
+          void StreamSession::Ug79BatchSetPhase(int phase, int timeout_ms)
+          {
+              ug79_batch_phase = phase;
+              const quint64 stage = ++ug79_batch_stage_token;
+              if(timeout_ms > 0)
+                  QTimer::singleShot(timeout_ms, this, [this, stage, phase]() {
+                      if(ug79_batch_active && ug79_batch_stage_token == stage && ug79_batch_phase == phase)
+                      {
+                          ug79KbV2Log("KB_V3_STAGE_TIMEOUT");
+                          Ug79BatchStop(QStringLiteral("Stopped: PS4 keyboard response timed out. Check game state before retrying."));
+                      }
+                  });
+          }
+
+          void StreamSession::Ug79BatchSendCurrent()
+          {
+              if(!ug79_batch_active || !connected || !ug79_batch_keyboard_open ||
+                 ug79_batch_phase != 1 || ug79_batch_index >= ug79_batch_commands.size())
+                  return;
+              const QString command = ug79_batch_commands.at(ug79_batch_index);
+              const QByteArray bytes = command.toUtf8();
+              if(bytes.isEmpty() || bytes.size() > 80)
+              {
+                  Ug79BatchStop(QStringLiteral("Stopped: invalid command length."));
+                  return;
+              }
+              if(ug79_batch_status)
+                  ug79_batch_status->setText(QStringLiteral("Sending %1 of %2; awaiting PS4 text response...")
+                      .arg(ug79_batch_index + 1).arg(ug79_batch_commands.size()));
+              Ug79BatchSetPhase(2, 6000); // Arm before sending: response may be very quick.
+              ug79KbV2Log("KB_V3_TEXT_SEND_BEGIN");
+              const ChiakiErrorCode err = chiaki_session_keyboard_set_text(&session, bytes.constData());
+              if(err != CHIAKI_ERR_SUCCESS)
+              {
+                  ug79KbV2Log("KB_V3_TEXT_SEND_FAILED");
+                  Ug79BatchStop(QStringLiteral("Stopped: text transport rejected request. Error %1.").arg((int)err));
+                  return;
+              }
+              ug79KbV2Log("KB_V3_TEXT_SUBMITTED");
+          }
+
+          void StreamSession::Ug79BatchOnReply(const QString &text)
+          {
+              if(!ug79_batch_active || ug79_batch_phase != 2)
+                  return;
+              if(!text.isEmpty() && text != ug79_batch_commands.at(ug79_batch_index))
+              {
+                  ug79KbV2Log("KB_V3_TEXT_RESPONSE_MISMATCH");
+                  Ug79BatchStop(QStringLiteral("Stopped: PS4 returned different text. No automatic Accept sent."));
+                  return;
+              }
+              ug79KbV2Log(text.isEmpty() ? "KB_V3_TEXT_RESPONSE_EMPTY" : "KB_V3_TEXT_RESPONSE_MATCHED");
+              Ug79BatchSetPhase(4, 0);
+              const quint64 stage = ug79_batch_stage_token;
+              QTimer::singleShot(160, this, [this, stage]() {
+                  if(!connected || !ug79_batch_active || ug79_batch_phase != 4 || ug79_batch_stage_token != stage)
+                      return;
+                  Ug79BatchSetPhase(3, 6000);
+                  ug79KbV2Log("KB_V3_ACCEPT_BEGIN");
+                  const ChiakiErrorCode err = chiaki_session_keyboard_accept(&session);
+                  if(err != CHIAKI_ERR_SUCCESS)
+                  {
+                      ug79KbV2Log("KB_V3_ACCEPT_FAILED");
+                      Ug79BatchStop(QStringLiteral("Stopped: Accept transport error %1.").arg((int)err));
+                  }
+                  else
+                      ug79KbV2Log("KB_V3_ACCEPT_SUBMITTED");
+              });
+          }
+
+          void StreamSession::Ug79BatchOnClose()
+          {
+              ug79_batch_keyboard_open = false;
+              if(!ug79_batch_active)
+                  return;
+              if(ug79_batch_phase != 3)
+              {
+                  Ug79BatchStop(QStringLiteral("Stopped: PS4 keyboard closed unexpectedly."));
+                  return;
+              }
+              ++ug79_batch_index;
+              ug79KbV2Log("KB_V3_COMMAND_CLOSED");
+              if(ug79_batch_index >= ug79_batch_commands.size())
+              {
+                  ug79KbV2Log("KB_V3_BATCH_COMPLETED_PROTOCOL");
+                  Ug79BatchStop(QStringLiteral("Queue complete: PS4 closed the keyboard for every command. Verify Minecraft results."));
+                  // Completion is protocol-level, not confirmation that Minecraft executed every command.
+                  return;
+              }
+              if(ug79_batch_status)
+                  ug79_batch_status->setText(QStringLiteral("Completed %1 of %2. Reopening Minecraft chat...")
+                      .arg(ug79_batch_index).arg(ug79_batch_commands.size()));
+              Ug79BatchSetPhase(5, 0);
+              const quint64 stage = ug79_batch_stage_token;
+              QTimer::singleShot(850, this, [this, stage]() {
+                  if(ug79_batch_active && ug79_batch_phase == 5 && ug79_batch_stage_token == stage)
+                      Ug79BatchReopen();
+              });
+          }
+
+          void StreamSession::Ug79BatchReopen()
+          {
+              if(!ug79_batch_active || !connected || ug79_batch_phase != 5)
+                  return;
+              Ug79BatchSetPhase(1, 9500);
+              const quint64 stage = ug79_batch_stage_token;
+              ug79KbV2Log("KB_V3_REOPEN_CHAT_BEGIN");
+              // Minecraft Bedrock PS4: D-pad Right opens chat, Cross selects the text input.
+              // Short pulses, explicit releases. No second blind Cross: timeout instead.
+              chiaki_controller_state_set_idle(&ug79_automation_state);
+              ug79_automation_state.buttons = CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT;
+              SendFeedbackState();
+              QTimer::singleShot(170, this, [this, stage]() {
+                  // Always release the pulse, even if KEYBOARD_OPEN arrived in the meantime.
+                  chiaki_controller_state_set_idle(&ug79_automation_state);
+                  if(connected)
+                      SendFeedbackState();
+                  if(!ug79_batch_active || ug79_batch_stage_token != stage || !connected)
+                      return;
+                  QTimer::singleShot(620, this, [this, stage]() {
+                      if(!ug79_batch_active || ug79_batch_stage_token != stage || !connected)
+                          return;
+                      ug79_automation_state.buttons = CHIAKI_CONTROLLER_BUTTON_CROSS;
+                      SendFeedbackState();
+                      QTimer::singleShot(170, this, [this, stage]() {
+                          // Never leave CROSS held if the PS4 opens its keyboard instantly.
+                          chiaki_controller_state_set_idle(&ug79_automation_state);
+                          if(connected)
+                              SendFeedbackState();
+                          if(!ug79_batch_active || ug79_batch_stage_token != stage || !connected)
+                              return;
+                          ug79KbV2Log("KB_V3_REOPEN_INPUT_SENT");
+                      });
+                  });
+              });
+          }
+
+          '''
+          cpp = replace_once(cpp, 'void StreamSession::Event(ChiakiEvent *event)',
+              methods + 'void StreamSession::Event(ChiakiEvent *event)', 'queued state machine')
+
+          # Capture verified keyboard-open events, and automatically send the next queued command.
+          cpp = replace_once(cpp, '''                          if(ug79_native_kb_dialog)
+                                    {
+                                        ug79_native_kb_dialog->raise();
+                                        ug79_native_kb_dialog->activateWindow();
+                                        return;
+                                    }''', '''                          ug79_batch_keyboard_open = true;
+                                    if(ug79_batch_active && ug79_batch_phase == 1)
+                                        Ug79BatchSendCurrent();
+                                    if(ug79_native_kb_dialog)
+                                    {
+                                        if(!ug79_batch_active)
+                                        {
+                                            ug79_native_kb_dialog->raise();
+                                            ug79_native_kb_dialog->activateWindow();
+                                        }
+                                        return;
+                                    }''', 'auto-send when next keyboard opens')
+
+          batch_ui = r'''                          if(qEnvironmentVariable("CHIAKI_KB_BATCH") == QStringLiteral("1"))
+                                    {
+                                        auto *description = new QLabel(QStringLiteral(
+                                            "V3 bounded queue: one Minecraft command per line. "
+                                            "Start once; Chiaki sends text, accepts, and reopens chat for each next line. "
+                                            "Protocol replies do not prove that Minecraft executed a command."), dialog);
+                                        description->setWordWrap(true);
+                                        layout->addWidget(description);
+                                        auto *batchLines = new QPlainTextEdit(dialog);
+                                        batchLines->setObjectName(QStringLiteral("ug79_batch_lines"));
+                                        batchLines->setPlainText(QStringLiteral(
+                                            "/say NativeBatch_V3_1\n/say NativeBatch_V3_2\n/say NativeBatch_V3_3"));
+                                        batchLines->setMinimumHeight(110);
+                                        layout->addWidget(batchLines);
+                                        auto *batchStatus = new QLabel(QStringLiteral("Batch idle. Open Minecraft chat before starting."), dialog);
+                                        batchStatus->setWordWrap(true);
+                                        ug79_batch_status = batchStatus;
+                                        layout->addWidget(batchStatus);
+                                        auto *repeatRow = new QHBoxLayout();
+                                        repeatRow->addWidget(new QLabel(QStringLiteral("Repeat whole list:"), dialog));
+                                        auto *repeats = new QSpinBox(dialog);
+                                        repeats->setRange(1, 5);
+                                        repeats->setValue(1);
+                                        repeatRow->addWidget(repeats);
+                                        auto *startBatch = new QPushButton(QStringLiteral("Start Batch"), dialog);
+                                        auto *stopBatch = new QPushButton(QStringLiteral("STOP Batch"), dialog);
+                                        repeatRow->addWidget(startBatch);
+                                        repeatRow->addWidget(stopBatch);
+                                        layout->addLayout(repeatRow);
+                                        connect(startBatch, &QPushButton::clicked, dialog,
+                                            [this, batchLines, repeats, batchStatus]() {
+                                            if(ug79_batch_active)
+                                                return;
+                                            if(!connected || !ug79_batch_keyboard_open)
+                                            {
+                                                batchStatus->setText(QStringLiteral("PS4 keyboard isn't open. Open it manually first."));
+                                                return;
+                                            }
+                                            QStringList commands;
+                                            const QStringList lines = batchLines->toPlainText().split('\n');
+                                            for(const QString &line : lines)
+                                            {
+                                                const QString command = line.trimmed();
+                                                if(command.isEmpty())
+                                                    continue;
+                                                const QByteArray bytes = command.toUtf8();
+                                                if(bytes.size() > 80 || !command.startsWith('/'))
+                                                {
+                                                    batchStatus->setText(QStringLiteral("Each nonblank line must start with / and be at most 80 UTF-8 bytes."));
+                                                    return;
+                                                }
+                                                commands.append(command);
+                                            }
+                                            if(commands.isEmpty() || commands.size() * repeats->value() > 40)
+                                            {
+                                                batchStatus->setText(QStringLiteral("Enter 1-40 commands total (including repetitions)."));
+                                                return;
+                                            }
+                                            ug79_batch_commands.clear();
+                                            for(int i = 0; i < repeats->value(); ++i)
+                                                ug79_batch_commands.append(commands);
+                                            ug79_batch_index = 0;
+                                            ug79_batch_active = true;
+                                            ug79KbV2Log("KB_V3_BATCH_STARTED");
+                                            Ug79BatchSetPhase(1, 0);
+                                            Ug79BatchSendCurrent();
+                                        });
+                                        connect(stopBatch, &QPushButton::clicked, dialog, [this]() {
+                                            Ug79BatchStop(QStringLiteral("Stopped by user. Close the PS4 keyboard manually if needed."));
+                                        });
+                                    }
+          '''
+          cpp = replace_once(cpp, '                          ug79_native_kb_dialog = dialog;',
+              batch_ui + '                          ug79_native_kb_dialog = dialog;', 'bounded queue dialog')
+
+          # Guard the old manual buttons while queue is active.
+          cpp = replace_once(cpp, '''                              [this, field, status, acceptButton]() {
+                                        if(!connected)''',
+          '''                              [this, field, status, acceptButton]() {
+                                        if(ug79_batch_active)
+                                            return;
+                                        if(!connected)''', 'disable manual Send during queue')
+          cpp = replace_once(cpp, '''                              [this, status, acceptButton]() {
+                                        if(!connected)''',
+          '''                              [this, status, acceptButton]() {
+                                        if(ug79_batch_active)
+                                            return;
+                                        if(!connected)''', 'disable manual Accept during queue')
+
+          # Closing the window must halt all queued activity (not merely hide the dialog).
+          cpp = replace_once(cpp, '''                connect(dialog, &QObject::destroyed, this, [this]() {
+                              ug79_native_kb_dialog = nullptr;
+                          });''', '''                connect(dialog, &QObject::destroyed, this, [this]() {
+                              if(ug79_batch_active)
+                                  Ug79BatchStop(QStringLiteral("Stopped: native keyboard dialog was closed."));
+                              ug79_native_kb_dialog = nullptr;
+                          });''', 'stop if dialog destroyed')
+          cpp = replace_once(cpp, '''                connect(dialog, &QDialog::rejected, this, [this]() {
+                              if(!connected)''', '''                connect(dialog, &QDialog::rejected, this, [this]() {
+                              if(ug79_batch_active)
+                                  Ug79BatchStop(QStringLiteral("Stopped: native keyboard dialog was cancelled."));
+                              if(!connected)''', 'stop if dialog cancelled')
+
+          # Read PS4's reply on callback thread, copy before posting to UI thread.
+          cpp = replace_once(cpp, '''                  case CHIAKI_EVENT_KEYBOARD_TEXT_CHANGE: {
+                                // A PS4 text-response event is not necessarily proof of insertion.
+                                ug79KbV2Log("KB_V2_TEXT_RESPONSE_EVENT");
+                                QMetaObject::invokeMethod(this, [this]() {''',
+          '''                  case CHIAKI_EVENT_KEYBOARD_TEXT_CHANGE: {
+                                // A PS4 text-response event is not necessarily proof of insertion.
+                                ug79KbV2Log("KB_V2_TEXT_RESPONSE_EVENT");
+                                const QString reply = event->keyboard.text_str ?
+                                    QString::fromUtf8(event->keyboard.text_str) : QString();
+                                QMetaObject::invokeMethod(this, [this, reply]() {
+                                    if(ug79_batch_active)
+                                        Ug79BatchOnReply(reply);''', 'validate response before auto-accept')
+
+          cpp = replace_once(cpp, '''                  case CHIAKI_EVENT_KEYBOARD_REMOTE_CLOSE:
+                                ug79KbV2Log("KB_V2_REMOTE_CLOSE_EVENT");
+                                QMetaObject::invokeMethod(this, [this]() {
+                                    if(ug79_native_kb_dialog)
+                                        ug79_native_kb_dialog->deleteLater(); // Do not accidentally send Cancel.
+                                }, Qt::QueuedConnection);
+                                break;''',
+          '''                  case CHIAKI_EVENT_KEYBOARD_REMOTE_CLOSE:
+                                ug79KbV2Log("KB_V2_REMOTE_CLOSE_EVENT");
+                                QMetaObject::invokeMethod(this, [this]() {
+                                    const bool batch_was_active = ug79_batch_active;
+                                    Ug79BatchOnClose();
+                                    if(!batch_was_active && ug79_native_kb_dialog)
+                                        ug79_native_kb_dialog->deleteLater();
+                                }, Qt::QueuedConnection);
+                                break;''', 'hold UI across close-and-reopen cycles')
+
+          # Stop promptly on disconnect, clearing held controller state.
+          cpp = replace_once(cpp, '''            QMetaObject::invokeMethod(this, [this]() {
+                                    if(ug79_native_kb_dialog)
+                                        ug79_native_kb_dialog->deleteLater();''',
+          '''            QMetaObject::invokeMethod(this, [this]() {
+                                    if(ug79_batch_active)
+                                        Ug79BatchStop(QStringLiteral("Stopped: PSN connection closed."));
+                                    if(ug79_native_kb_dialog)
+                                        ug79_native_kb_dialog->deleteLater();''', 'disconnect fail-closed')
+
+          cpp_path.write_text(cpp, encoding='utf-8')
+          header_path.write_text(hpp, encoding='utf-8')
+          print('Native keyboard batch v3 patches applied successfully to temporary checkout.')
+          PY
+
       - name: Build libplacebo
         run: |
           scripts/build-libplacebo-windows.sh
@@ -900,6 +1286,7 @@ jobs:
               'TEST-KB-Toggle-RISK-Disconnect.cmd': ('toggle', 'KBPROBE-Toggle.log'),
               'TEST-KB-Both-RISK-Disconnect.cmd': ('both', 'KBPROBE-Both.log'),
               'TEST-Native-Text-v2.cmd': ('both', 'KBPROBE-NativeText-v2.log'),
+              'TEST-Native-Batch-v3.cmd': ('both', 'KBPROBE-NativeBatch-v3.log'),
           }
           for filename, (mode, logfile) in launchers.items():
               commands = [
@@ -908,6 +1295,7 @@ jobs:
                   'set "VK_LOADER_DRIVERS_DISABLE=*dzn*"',
                   f'set "CHIAKI_KB_PROBE={mode}"',
                   f'set "CHIAKI_KB_DIAG_LOG=%~dp0{logfile}"',
+                  'set "CHIAKI_KB_BATCH=1"' if filename == 'TEST-Native-Batch-v3.cmd' else 'set "CHIAKI_KB_BATCH=0"',
                   'start "" "%~dp0chiaki.exe"',
               ]
               (folder / filename).write_bytes(('\r\n'.join(commands) + '\r\n').encode('utf-8'))
@@ -925,6 +1313,11 @@ jobs:
               '10. v2: TEST-Native-Text-v2.cmd opens an opt-in Windows text dialog when PS4 sends KEYBOARD_OPEN.\n'
               '11. v2: First click Send Text with hello123 and inspect Minecraft; then click Accept / Done.\n'
               '12. v2: The text content is never placed in KBPROBE diagnostic logs.\n',
+              '13. v3: TEST-Native-Batch-v3.cmd opens a bounded queued command dialog when PS4 keyboard first opens.\n'
+              '14. Open Minecraft chat and keyboard manually once; paste one slash-command per line, then click Start Batch.\n'
+              '15. v3 sends each command, awaits PS4 text response, accepts, awaits close, then taps RIGHT and CROSS to reopen.\n'
+              '16. STOP Batch and timeouts halt the automation. Max 40 total commands per batch.\n'
+              '17. Use harmless /say tests first; protocol replies do not prove Minecraft executed commands.\n',
               encoding='utf-8',
           )
           print('PSN keyboard experiment launchers generated.')
@@ -932,12 +1325,12 @@ jobs:
 
       - name: Package portable prototype
         run: |
-          zip -r chiaki-ng-PSN-native-text-v2-win64.zip chiaki-ng-Win
+          zip -r chiaki-ng-PSN-native-batch-v3-win64.zip chiaki-ng-Win
 
       - name: Upload portable prototype
         uses: actions/upload-artifact@v4
         with:
-          name: chiaki-ng-PSN-native-text-v2-win64
-          path: chiaki-ng-PSN-native-text-v2-win64.zip
+          name: chiaki-ng-PSN-native-batch-v3-win64
+          path: chiaki-ng-PSN-native-batch-v3-win64.zip
           if-no-files-found: error
           retention-days: 7
