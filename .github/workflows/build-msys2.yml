@@ -1,4 +1,4 @@
-name: Build Chiaki-ng Windows - PSN Keyboard Diagnostics v1
+name: Build Chiaki-ng Windows - PSN Native Text Diagnostics v2
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-windows_x64-msys2:
-    name: Build Windows x64 PSN Keyboard Diagnostics with Minecraft controls
+    name: Build Windows x64 PSN Native Text v2 with Minecraft controls
     runs-on: windows-latest
     defaults:
       run:
@@ -629,6 +629,230 @@ jobs:
           print('KBPROBE: source patch completed; no application or PSN changes performed at build time')
           PY
 
+      - name: Inject opt-in PSN native keyboard text interface v2 (temporary checkout)
+        run: |
+          python - <<'PY'
+          #!/usr/bin/env python3
+          """Opt-in Native Keyboard v2 extension for the existing keyboard diagnostics checkout.
+          Run AFTER the Build #7 and KBPROBE v1 temporary source patches, BEFORE CMake.
+          Only alters the GitHub Actions temporary checkout, never the user's Build #7 branch.
+          """
+          from pathlib import Path
+
+          cppfile = Path('gui/src/streamsession.cpp')
+          headerfile = Path('gui/include/streamsession.h')
+          ctrlfile = Path('lib/src/ctrl.c')
+          cpp = cppfile.read_text(encoding='utf-8')
+          header = headerfile.read_text(encoding='utf-8')
+          ctrl = ctrlfile.read_text(encoding='utf-8')
+
+          def change(src, old, new, purpose):
+              n = src.count(old)
+              if n != 1:
+                  raise RuntimeError(f'NativeKB v2 {purpose}: wanted exactly one source anchor, got {n}; refusing to modify')
+              print('NativeKB v2 validated patch:', purpose)
+              return src.replace(old, new, 1)
+
+          header = change(header, '#include <QAtomicInteger>',
+              '#include <QAtomicInteger>\n#include <QPointer>\n#include <QDialog>', 'GUI header support')
+          header = change(header, '\t\tChiakiControllerState keyboard_state;',
+              '\t\tChiakiControllerState keyboard_state;\n\t\tQPointer<QDialog> ug79_native_kb_dialog;',
+              'per-session dialog lifetime')
+          cpp = change(cpp, '#include <QKeyEvent>',
+              '#include <QKeyEvent>\n#include <QDialog>\n#include <QLineEdit>\n#include <QLabel>\n#include <QPushButton>\n#include <QVBoxLayout>\n#include <QHBoxLayout>\n#include <QFile>\n#include <QPointer>',
+              'native dialog Qt includes')
+
+          helper = r'''// Native Keyboard v2: metadata-only milestones; never log input text or IDs.
+          static void ug79KbV2Log(const char *milestone)
+          {
+              const QString filename = qEnvironmentVariable("CHIAKI_KB_DIAG_LOG");
+              if(filename.isEmpty())
+                  return;
+              QFile file(filename);
+              if(file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+              {
+                  file.write(QByteArray::number(QDateTime::currentSecsSinceEpoch()));
+                  file.write(" ");
+                  file.write(milestone);
+                  file.write("\n");
+              }
+          }
+
+          '''
+          cpp = change(cpp, 'void StreamSession::Event(ChiakiEvent *event)\n{',
+              helper + 'void StreamSession::Event(ChiakiEvent *event)\n{',
+              'private GUI diagnostics helper')
+
+          cases = r'''		case CHIAKI_EVENT_KEYBOARD_OPEN: {
+                      // Core callbacks may arrive from a background thread. Copy any text
+                      // before returning; GUI objects may only be touched on the Qt GUI thread.
+                      const QString initial = event->keyboard.text_str
+                          ? QString::fromUtf8(event->keyboard.text_str) : QString();
+                      ug79KbV2Log("KB_V2_GUI_OPEN_EVENT");
+                      QMetaObject::invokeMethod(this, [this, initial]() {
+                          // Strictly opt-in; never interrupt ordinary controller-based typing.
+                          if(qEnvironmentVariable("CHIAKI_KB_PROBE") != QStringLiteral("both") || !connected)
+                              return;
+                          if(ug79_native_kb_dialog)
+                          {
+                              ug79_native_kb_dialog->raise();
+                              ug79_native_kb_dialog->activateWindow();
+                              return;
+                          }
+                          auto *dialog = new QDialog(nullptr, Qt::Window | Qt::WindowStaysOnTopHint);
+                          dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+                          dialog->setWindowTitle(QStringLiteral("Chiaki native keyboard - experimental v2"));
+                          dialog->setMinimumWidth(440);
+                          auto *layout = new QVBoxLayout(dialog);
+                          auto *intro = new QLabel(QStringLiteral(
+                              "PS4 native keyboard requested text. Try a harmless word such as hello123. "
+                              "First click Send Text, then check Minecraft. Click Accept only afterwards."), dialog);
+                          intro->setWordWrap(true);
+                          layout->addWidget(intro);
+                          auto *field = new QLineEdit(dialog);
+                          field->setMaxLength(80); // Keep the PSN control datagram below our safety limit.
+                          field->setText(initial.left(80));
+                          field->setPlaceholderText(QStringLiteral("hello123"));
+                          layout->addWidget(field);
+                          auto *status = new QLabel(QStringLiteral("Ready. No text has been sent."), dialog);
+                          status->setObjectName(QStringLiteral("ug79_kb_status"));
+                          status->setWordWrap(true);
+                          layout->addWidget(status);
+                          auto *buttons = new QHBoxLayout();
+                          auto *sendButton = new QPushButton(QStringLiteral("Send Text"), dialog);
+                          auto *acceptButton = new QPushButton(QStringLiteral("Accept / Done"), dialog);
+                          auto *cancelButton = new QPushButton(QStringLiteral("Cancel"), dialog);
+                          acceptButton->setEnabled(false); // Separate text send and accept for diagnosis.
+                          buttons->addWidget(sendButton);
+                          buttons->addWidget(acceptButton);
+                          buttons->addWidget(cancelButton);
+                          layout->addLayout(buttons);
+                          ug79_native_kb_dialog = dialog;
+                          connect(dialog, &QObject::destroyed, this, [this]() {
+                              ug79_native_kb_dialog = nullptr;
+                          });
+                          connect(field, &QLineEdit::textChanged, acceptButton, [acceptButton]() {
+                              acceptButton->setEnabled(false); // Edited text must be resent.
+                          });
+                          connect(sendButton, &QPushButton::clicked, dialog,
+                              [this, field, status, acceptButton]() {
+                              if(!connected)
+                              {
+                                  status->setText(QStringLiteral("Not connected; nothing sent."));
+                                  return;
+                              }
+                              const QByteArray bytes = field->text().toUtf8();
+                              if(bytes.size() > 512) // Defensive even if Unicode chars are long.
+                              {
+                                  status->setText(QStringLiteral("Input too long; maximum 512 UTF-8 bytes."));
+                                  ug79KbV2Log("KB_V2_TEXT_REJECTED_TOO_LARGE");
+                                  return;
+                              }
+                              ug79KbV2Log("KB_V2_TEXT_SEND_BEGIN");
+                              const ChiakiErrorCode err = chiaki_session_keyboard_set_text(&session, bytes.constData());
+                              if(err == CHIAKI_ERR_SUCCESS)
+                              {
+                                  ug79KbV2Log("KB_V2_TEXT_SENT_TO_TRANSPORT");
+                                  status->setText(QStringLiteral("Text submitted to transport. Check Minecraft, then Accept / Done."));
+                                  acceptButton->setEnabled(true);
+                              }
+                              else
+                              {
+                                  ug79KbV2Log("KB_V2_TEXT_SEND_ERROR");
+                                  status->setText(QStringLiteral("Transport rejected text request; error %1").arg((int)err));
+                                  acceptButton->setEnabled(false);
+                              }
+                          });
+                          connect(acceptButton, &QPushButton::clicked, dialog,
+                              [this, status, acceptButton]() {
+                              if(!connected)
+                              {
+                                  status->setText(QStringLiteral("Not connected; nothing sent."));
+                                  return;
+                              }
+                              ug79KbV2Log("KB_V2_ACCEPT_SEND_BEGIN");
+                              const ChiakiErrorCode err = chiaki_session_keyboard_accept(&session);
+                              if(err == CHIAKI_ERR_SUCCESS)
+                              {
+                                  ug79KbV2Log("KB_V2_ACCEPT_SENT_TO_TRANSPORT");
+                                  status->setText(QStringLiteral("Accept sent. Waiting for PS4 to close the keyboard."));
+                                  acceptButton->setEnabled(false);
+                              }
+                              else
+                              {
+                                  ug79KbV2Log("KB_V2_ACCEPT_SEND_ERROR");
+                                  status->setText(QStringLiteral("Accept send failed; error %1").arg((int)err));
+                              }
+                          });
+                          connect(cancelButton, &QPushButton::clicked, dialog, [dialog]() {
+                              dialog->reject();
+                          });
+                          connect(dialog, &QDialog::rejected, this, [this]() {
+                              if(!connected)
+                                  return;
+                              ug79KbV2Log("KB_V2_REJECT_SEND_BEGIN");
+                              const ChiakiErrorCode err = chiaki_session_keyboard_reject(&session);
+                              ug79KbV2Log(err == CHIAKI_ERR_SUCCESS ?
+                                  "KB_V2_REJECT_SENT_TO_TRANSPORT" : "KB_V2_REJECT_SEND_ERROR");
+                          });
+                          ug79KbV2Log("KB_V2_DIALOG_SHOWN");
+                          dialog->show();
+                          field->setFocus();
+                      }, Qt::QueuedConnection);
+                      break;
+                  }
+                  case CHIAKI_EVENT_KEYBOARD_TEXT_CHANGE: {
+                      // A PS4 text-response event is not necessarily proof of insertion.
+                      ug79KbV2Log("KB_V2_TEXT_RESPONSE_EVENT");
+                      QMetaObject::invokeMethod(this, [this]() {
+                          if(ug79_native_kb_dialog)
+                          {
+                              auto *status = ug79_native_kb_dialog->findChild<QLabel *>(
+                                  QStringLiteral("ug79_kb_status"));
+                              if(status)
+                                  status->setText(QStringLiteral("PS4 sent a native text-response event. Check its screen."));
+                          }
+                      }, Qt::QueuedConnection);
+                      break;
+                  }
+                  case CHIAKI_EVENT_KEYBOARD_REMOTE_CLOSE:
+                      ug79KbV2Log("KB_V2_REMOTE_CLOSE_EVENT");
+                      QMetaObject::invokeMethod(this, [this]() {
+                          if(ug79_native_kb_dialog)
+                              ug79_native_kb_dialog->deleteLater(); // Do not accidentally send Cancel.
+                      }, Qt::QueuedConnection);
+                      break;
+          '''
+          cpp = change(cpp, '\t\tcase CHIAKI_EVENT_REGIST:', cases + '\t\tcase CHIAKI_EVENT_REGIST:',
+              'native keyboard open, text response and close UI')
+          cpp = change(cpp, '\t\t\tconnected = false;',
+              '''            QMetaObject::invokeMethod(this, [this]() {
+                          if(ug79_native_kb_dialog)
+                              ug79_native_kb_dialog->deleteLater();
+                      }, Qt::QueuedConnection);
+          \t\t\tconnected = false;''',
+              'close native dialog safely on session quit')
+
+          ctrl = change(ctrl,
+              'keyboard_event.type = CHIAKI_EVENT_KEYBOARD_OPEN;',
+              'kbprobe_event("KEYBOARD_OPEN_EVENT_VALIDATED");\n\tkeyboard_event.type = CHIAKI_EVENT_KEYBOARD_OPEN;',
+              'confirmation that keyboard open payload passed core checks')
+          ctrl = change(ctrl,
+              'keyboard_event.type = CHIAKI_EVENT_KEYBOARD_REMOTE_CLOSE;',
+              'kbprobe_event("KEYBOARD_REMOTE_CLOSE_RECEIVED");\n\tkeyboard_event.type = CHIAKI_EVENT_KEYBOARD_REMOTE_CLOSE;',
+              'PS4 native keyboard close diagnostic')
+          ctrl = change(ctrl,
+              'keyboard_event.type = CHIAKI_EVENT_KEYBOARD_TEXT_CHANGE;',
+              'kbprobe_event("KEYBOARD_TEXT_RESPONSE_EVENT_VALIDATED");\n\tkeyboard_event.type = CHIAKI_EVENT_KEYBOARD_TEXT_CHANGE;',
+              'native text reply validation')
+
+          # Only write after every anchor validates, to avoid half-applied checkouts.
+          cppfile.write_text(cpp, encoding='utf-8')
+          headerfile.write_text(header, encoding='utf-8')
+          ctrlfile.write_text(ctrl, encoding='utf-8')
+          print('Native Keyboard v2 source patches complete; experimental PSN input is opt-in.')
+          PY
+
       - name: Build libplacebo
         run: |
           scripts/build-libplacebo-windows.sh
@@ -675,6 +899,7 @@ jobs:
               'TEST-KB-Enable-RISK-Disconnect.cmd': ('enable', 'KBPROBE-Enable.log'),
               'TEST-KB-Toggle-RISK-Disconnect.cmd': ('toggle', 'KBPROBE-Toggle.log'),
               'TEST-KB-Both-RISK-Disconnect.cmd': ('both', 'KBPROBE-Both.log'),
+              'TEST-Native-Text-v2.cmd': ('both', 'KBPROBE-NativeText-v2.log'),
           }
           for filename, (mode, logfile) in launchers.items():
               commands = [
@@ -696,7 +921,10 @@ jobs:
               '6. Each launcher writes a separate KBPROBE-*.log file in this extracted folder.\n'
               '7. Do not enable verbose packet dumps or publish credentials/tokens/session IDs.\n'
               '8. A SENT_TO_TRANSPORT line is NOT proof that the PlayStation accepted a message.\n'
-              '9. Do not run any TEST-KB launcher unless you are prepared for possible disconnection.\n',
+              '9. Do not run any TEST-KB launcher unless you are prepared for possible disconnection.\n'
+              '10. v2: TEST-Native-Text-v2.cmd opens an opt-in Windows text dialog when PS4 sends KEYBOARD_OPEN.\n'
+              '11. v2: First click Send Text with hello123 and inspect Minecraft; then click Accept / Done.\n'
+              '12. v2: The text content is never placed in KBPROBE diagnostic logs.\n',
               encoding='utf-8',
           )
           print('PSN keyboard experiment launchers generated.')
@@ -704,12 +932,12 @@ jobs:
 
       - name: Package portable prototype
         run: |
-          zip -r chiaki-ng-PSN-keyboard-diagnostics-v1-win64.zip chiaki-ng-Win
+          zip -r chiaki-ng-PSN-native-text-v2-win64.zip chiaki-ng-Win
 
       - name: Upload portable prototype
         uses: actions/upload-artifact@v4
         with:
-          name: chiaki-ng-PSN-keyboard-diagnostics-v1-win64
-          path: chiaki-ng-PSN-keyboard-diagnostics-v1-win64.zip
+          name: chiaki-ng-PSN-native-text-v2-win64
+          path: chiaki-ng-PSN-native-text-v2-win64.zip
           if-no-files-found: error
           retention-days: 7
