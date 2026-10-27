@@ -1562,7 +1562,7 @@ jobs:
 
           # P4 and P5 were observed to fail PS4 chat opening. No destructive tests at those speeds.
           patch('''ug79_batch_commands.clear();
-                            for(int i=0;i<repeats->value();++i)''',
+                  for(int i=0;i<repeats->value();++i)''',
               '''if(qEnvironmentVariable("CHIAKI_KB_BUILD_TEST") == QStringLiteral("1") &&
                                speedProfile->currentIndex() > 3)
                             {
