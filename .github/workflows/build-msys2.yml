@@ -1,4 +1,4 @@
-name: Build Chiaki-ng Windows - PSN Native Batch Diagnostics v3
+name: Build Chiaki-ng Windows - Full-Cycle Speed Test v4
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-windows_x64-msys2:
-    name: Build Windows x64 PSN Native Batch v3 with Minecraft controls
+    name: Build Windows x64 Full-Cycle Speed Test v4
     runs-on: windows-latest
     defaults:
       run:
@@ -1239,6 +1239,209 @@ jobs:
           print('Native keyboard batch v3 patches applied successfully to temporary checkout.')
           PY
 
+      - name: Inject opt-in full-cycle speed test v4 (temporary checkout)
+        run: |
+          python - <<'PY'
+          #!/usr/bin/env python3
+          '''Full-cycle speed test v4, built ONLY in the GitHub Actions temporary checkout.
+          
+          The working Native Batch v3 executable/branch is never modified. V4 shows a
+          setup window on PSN session connection, so the first D-pad Right -> Cross ->
+          keyboard open -> text -> Accept -> keyboard close is automated and measured.
+          All new functionality is opt-in behind CHIAKI_KB_FULLCYCLE=1.
+          '''
+          from pathlib import Path
+          import re
+          cppfile=Path('gui/src/streamsession.cpp')
+          hppfile=Path('gui/include/streamsession.h')
+          cpp=cppfile.read_text(encoding='utf-8')
+          hpp=hppfile.read_text(encoding='utf-8')
+          
+          def replace_once(src, old, new, desc):
+              if old == new: raise RuntimeError(desc + ' identical strings')
+              if src.count(old)==1:
+                  print('Fullcycle v4 patch verified:', desc)
+                  return src.replace(old,new,1)
+              # Accept changing only indentation across Windows checkout; no fuzzy
+              # content substitution allowed (fail closed on missing anchors).
+              expr=''
+              for line in old.splitlines(keepends=True):
+                  content=line.rstrip('\r\n').strip()
+                  has_eol=line.endswith('\n')
+                  expr += (r'^[ \t]*'+re.escape(content) if content else r'^[ \t]*')
+                  if has_eol:expr+='\n'
+              matches=list(re.finditer(expr,src,re.MULTILINE))
+              if len(matches)!=1:
+                  raise RuntimeError(f'Fullcycle v4 {desc}: expected one exact or indentation-normalized anchor, found {len(matches)}')
+              m=matches[0]
+              print('Fullcycle v4 normalized patch verified:', desc)
+              return src[:m.start()]+new+src[m.end():]
+          
+          hpp=replace_once(hpp,'#include <QStringList>','#include <QStringList>\n#include <QElapsedTimer>','monotonic timing header')
+          hpp=replace_once(hpp,'quint64 ug79_batch_stage_token = 0;', '''quint64 ug79_batch_stage_token = 0;
+                          QElapsedTimer ug79_v4_clock;
+                          void Ug79V4Log(const char *event);
+                          void Ug79V4ShowFullCyclePanel();''','timer and panel declaration')
+          
+          # The existing v3 state machine remains responsible for all controller and
+          # protocol events. Do not replace it with blind sleeps or change v3 settings.
+          methods=r'''// V4: sanitized millisecond timing on the GUI thread; log no command content.
+          void StreamSession::Ug79V4Log(const char *event)
+          {
+              if(qEnvironmentVariable("CHIAKI_KB_FULLCYCLE") != QStringLiteral("1"))
+                  return;
+              const QString filename=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG");
+              if(filename.isEmpty())
+                  return;
+              QFile file(filename);
+              if(!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+                  return;
+              const qint64 elapsed=ug79_v4_clock.isValid() ? ug79_v4_clock.elapsed() : -1;
+              const QByteArray line=QByteArray("KB_V4_MS utc_ms=") +
+                  QByteArray::number(QDateTime::currentMSecsSinceEpoch()) +
+                  " elapsed_ms=" + QByteArray::number(elapsed) +
+                  " command=" + QByteArray::number(ug79_batch_index+1) +
+                  " event=" + event + "\n";
+              file.write(line);
+          }
+          
+          // Standalone opt-in setup panel appears on Remote Play connection.
+          // The user must leave Minecraft in normal gameplay before pressing Start.
+          void StreamSession::Ug79V4ShowFullCyclePanel()
+          {
+              if(!connected || qEnvironmentVariable("CHIAKI_KB_FULLCYCLE") != QStringLiteral("1") ||
+                 qEnvironmentVariable("CHIAKI_KB_PROBE") != QStringLiteral("both") || ug79_native_kb_dialog)
+                  return;
+              auto *dialog=new QDialog(nullptr, Qt::Window | Qt::WindowStaysOnTopHint);
+              dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+              dialog->setWindowTitle(QStringLiteral("Chiaki v4 - Full-Cycle Speed Test (PS4 Bedrock)"));
+              dialog->setMinimumWidth(490);
+              auto *layout=new QVBoxLayout(dialog);
+              auto *instructions=new QLabel(QStringLiteral(
+                 "Start from normal Minecraft gameplay, with chat and the PS4 keyboard CLOSED. "
+                 "Click Start Full Cycle to have Chiaki press Right, Cross, send text, Accept, "
+                 "and repeat without manual chat opening. Use /say commands for this speed test. "
+                 "The program cannot verify Minecraft's on-screen execution."),dialog);
+              instructions->setWordWrap(true);
+              layout->addWidget(instructions);
+              auto *lines=new QPlainTextEdit(dialog);
+              lines->setPlainText(QStringLiteral(
+                  "/say SPEED_01\n"
+                  "/say SPEED_02_Testing_native_text_entry\n"
+                  "/say SPEED_03_-15_100_-15_15_119_15\n"
+                  "/say SPEED_04_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789"));
+              lines->setMinimumHeight(120);
+              layout->addWidget(lines);
+              auto *row=new QHBoxLayout();
+              row->addWidget(new QLabel(QStringLiteral("Repeat list:"),dialog));
+              auto *repeats=new QSpinBox(dialog);
+              repeats->setRange(1,5);
+              repeats->setValue(5);
+              row->addWidget(repeats);
+              auto *start=new QPushButton(QStringLiteral("Start Full Cycle"),dialog);
+              auto *stop=new QPushButton(QStringLiteral("STOP Batch"),dialog);
+              row->addWidget(start);
+              row->addWidget(stop);
+              layout->addLayout(row);
+              auto *status=new QLabel(QStringLiteral("Ready; Minecraft must be in normal gameplay."),dialog);
+              status->setWordWrap(true);
+              layout->addWidget(status);
+              ug79_batch_status=status;
+              ug79_native_kb_dialog=dialog;
+              connect(dialog,&QObject::destroyed,this,[this]() {
+                  if(ug79_batch_active)
+                      Ug79BatchStop(QStringLiteral("Stopped: full-cycle panel was closed."));
+                  ug79_native_kb_dialog=nullptr;
+                  ug79_batch_status=nullptr;
+              });
+              connect(stop,&QPushButton::clicked,dialog,[this]() {
+                  Ug79V4Log("USER_STOP");
+                  Ug79BatchStop(QStringLiteral("Stopped by user. Check game state before another run."));
+              });
+              connect(start,&QPushButton::clicked,dialog,[this,lines,repeats,status]() {
+                  if(ug79_batch_active)
+                      return;
+                  if(!connected || ug79_batch_keyboard_open)
+                  {
+                      status->setText(QStringLiteral("Close the PS4 keyboard and Minecraft chat, then start from gameplay."));
+                      return;
+                  }
+                  QStringList commands;
+                  const QStringList input=lines->toPlainText().split('\n');
+                  for(const QString &raw:input)
+                  {
+                      const QString command=raw.trimmed();
+                      if(command.isEmpty())continue;
+                      const QByteArray utf8=command.toUtf8();
+                      // V4 is a nondestructive speed test: ONLY /say commands are allowed.
+                      if(!command.startsWith(QStringLiteral("/say ")) || utf8.size()>80)
+                      {
+                          status->setText(QStringLiteral("Speed test only: use /say commands, each at most 80 UTF-8 bytes."));
+                          return;
+                      }
+                      commands.append(command);
+                  }
+                  if(commands.isEmpty() || commands.size()*repeats->value()>40)
+                  {
+                      status->setText(QStringLiteral("Use 1-40 total commands including repetitions."));
+                      return;
+                  }
+                  ug79_batch_commands.clear();
+                  for(int i=0;i<repeats->value();++i)
+                      ug79_batch_commands.append(commands);
+                  ug79_batch_index=0;
+                  ug79_batch_active=true;
+                  ug79_v4_clock.start();
+                  Ug79V4Log("BATCH_START_FROM_GAMEPLAY");
+                  ug79KbV2Log("KB_V4_FULLCYCLE_BATCH_STARTED");
+                  Ug79BatchSetPhase(5,0);
+                  Ug79BatchReopen(); // First chat opening is measured, not manual.
+              });
+              dialog->show();
+              ug79KbV2Log("KB_V4_FULLCYCLE_PANEL_SHOWN");
+          }
+          
+          '''
+          cpp=replace_once(cpp,'void StreamSession::Ug79BatchStop(const QString &reason)', methods+'void StreamSession::Ug79BatchStop(const QString &reason)','fullcycle timing helpers')
+          
+          # Session callback is on Chiaki thread, GUI display must be queued.
+          cpp=replace_once(cpp, '''		case CHIAKI_EVENT_CONNECTED:
+          			connect_timer.invalidate();
+          			connected = true;
+          			emit ConnectedChanged();
+          			break;''', '''		case CHIAKI_EVENT_CONNECTED:
+          			connect_timer.invalidate();
+          			connected = true;
+          			emit ConnectedChanged();
+                      QMetaObject::invokeMethod(this, [this]() {
+                          Ug79V4ShowFullCyclePanel();
+                      }, Qt::QueuedConnection);
+          			break;''', 'connect to opt-in setup panel')
+          
+          cpp=replace_once(cpp,'ug79KbV2Log("KB_V3_REOPEN_CHAT_BEGIN");','ug79KbV2Log("KB_V3_REOPEN_CHAT_BEGIN");\n              Ug79V4Log("RIGHT_DOWN");','first and subsequent Right press log')
+          cpp=replace_once(cpp,'// Always release the pulse, even if KEYBOARD_OPEN arrived in the meantime.','Ug79V4Log("RIGHT_UP");\n                  // Always release the pulse, even if KEYBOARD_OPEN arrived in the meantime.','Right release log')
+          cpp=replace_once(cpp,'ug79_automation_state.buttons = CHIAKI_CONTROLLER_BUTTON_CROSS;','Ug79V4Log("CROSS_DOWN");\n                      ug79_automation_state.buttons = CHIAKI_CONTROLLER_BUTTON_CROSS;','Cross press log')
+          cpp=replace_once(cpp,'// Never leave CROSS held if the PS4 opens its keyboard instantly.','Ug79V4Log("CROSS_UP");\n                          // Never leave CROSS held if the PS4 opens its keyboard instantly.','Cross release log')
+          cpp=replace_once(cpp,'ug79KbV2Log("KB_V3_TEXT_SEND_BEGIN");','ug79KbV2Log("KB_V3_TEXT_SEND_BEGIN");\n              Ug79V4Log("TEXT_SEND_BEGIN");','text send log')
+          cpp=replace_once(cpp,'Ug79BatchSetPhase(4, 0);','Ug79V4Log("TEXT_RESPONSE_MATCHED");\n              Ug79BatchSetPhase(4, 0);','text reply log')
+          cpp=replace_once(cpp,'ug79KbV2Log("KB_V3_ACCEPT_BEGIN");','ug79KbV2Log("KB_V3_ACCEPT_BEGIN");\n                  Ug79V4Log("ACCEPT_BEGIN");','Accept log')
+          cpp=replace_once(cpp,'++ug79_batch_index;','Ug79V4Log("KEYBOARD_CLOSED");\n              ++ug79_batch_index;','keyboard close log')
+          cpp=replace_once(cpp,'ug79KbV2Log("KB_V3_BATCH_COMPLETED_PROTOCOL");','ug79KbV2Log("KB_V3_BATCH_COMPLETED_PROTOCOL");\n                  Ug79V4Log("BATCH_COMPLETED_PROTOCOL");','batch end log')
+          cpp=replace_once(cpp,'ug79KbV2Log("KB_V3_BATCH_STOPPED");','ug79KbV2Log("KB_V3_BATCH_STOPPED");\n              Ug79V4Log("BATCH_STOPPED");','Stop log')
+          # On verified OPEN arrival, execute the v3 event-driven send; logging belongs to GUI queue.
+          cpp=replace_once(cpp,'''                          ug79_batch_keyboard_open = true;
+                                              if(ug79_batch_active && ug79_batch_phase == 1)''','''                          ug79_batch_keyboard_open = true;
+                                              Ug79V4Log("KEYBOARD_OPEN");
+                                              if(ug79_batch_active && ug79_batch_phase == 1)''','keyboard open log')
+          # V3 deletes the dialog on an unsolicited PS4 keyboard close. In opt-in v4,
+          # retain the dashboard so one can restart a later run after inspecting results.
+          cpp=replace_once(cpp,'if(!batch_was_active && ug79_native_kb_dialog)','if(!batch_was_active && ug79_native_kb_dialog &&\n                                       qEnvironmentVariable("CHIAKI_KB_FULLCYCLE") != QStringLiteral("1"))','preserve v4 panel across keyboard close')
+          
+          cppfile.write_text(cpp,encoding='utf-8')
+          hppfile.write_text(hpp,encoding='utf-8')
+          print('Full-cycle v4 patch complete (temporary GitHub runner checkout only).')
+          PY
+
       - name: Build libplacebo
         run: |
           scripts/build-libplacebo-windows.sh
@@ -1287,6 +1490,7 @@ jobs:
               'TEST-KB-Both-RISK-Disconnect.cmd': ('both', 'KBPROBE-Both.log'),
               'TEST-Native-Text-v2.cmd': ('both', 'KBPROBE-NativeText-v2.log'),
               'TEST-Native-Batch-v3.cmd': ('both', 'KBPROBE-NativeBatch-v3.log'),
+              'TEST-Full-Cycle-v4.cmd': ('both', 'KBPROBE-FullCycle-v4.log'),
           }
           for filename, (mode, logfile) in launchers.items():
               commands = [
@@ -1295,7 +1499,8 @@ jobs:
                   'set "VK_LOADER_DRIVERS_DISABLE=*dzn*"',
                   f'set "CHIAKI_KB_PROBE={mode}"',
                   f'set "CHIAKI_KB_DIAG_LOG=%~dp0{logfile}"',
-                  'set "CHIAKI_KB_BATCH=1"' if filename == 'TEST-Native-Batch-v3.cmd' else 'set "CHIAKI_KB_BATCH=0"',
+                  'set "CHIAKI_KB_BATCH=1"' if filename in ('TEST-Native-Batch-v3.cmd', 'TEST-Full-Cycle-v4.cmd') else 'set "CHIAKI_KB_BATCH=0"',
+                  'set "CHIAKI_KB_FULLCYCLE=1"' if filename == 'TEST-Full-Cycle-v4.cmd' else 'set "CHIAKI_KB_FULLCYCLE=0"',
                   'start "" "%~dp0chiaki.exe"',
               ]
               (folder / filename).write_bytes(('\r\n'.join(commands) + '\r\n').encode('utf-8'))
@@ -1317,7 +1522,11 @@ jobs:
               '14. Open Minecraft chat and keyboard manually once; paste one slash-command per line, then click Start Batch.\n'
               '15. v3 sends each command, awaits PS4 text response, accepts, awaits close, then taps RIGHT and CROSS to reopen.\n'
               '16. STOP Batch and timeouts halt the automation. Max 40 total commands per batch.\n'
-              '17. Use harmless /say tests first; protocol replies do not prove Minecraft executed commands.\n',
+              '17. Use harmless /say tests first; protocol replies do not prove Minecraft executed commands.\n'
+              '18. V4: TEST-Full-Cycle-v4.cmd shows the setup panel after Chiaki connects; do not manually open chat.\n'
+              '19. In normal Minecraft gameplay, click Start Full Cycle to automatically open chat for the FIRST command.\n'
+              '20. V4 test permits /say only (max 40); log KBPROBE-FullCycle-v4.log contains KB_V4_MS timestamps.\n'
+              '21. V4 is experimental. Stop on any unexpected behaviour; source files and V3 remain unchanged.\n',
               encoding='utf-8',
           )
           print('PSN keyboard experiment launchers generated.')
@@ -1325,12 +1534,12 @@ jobs:
 
       - name: Package portable prototype
         run: |
-          zip -r chiaki-ng-PSN-native-batch-v3-win64.zip chiaki-ng-Win
+          zip -r chiaki-ng-full-cycle-v4-win64.zip chiaki-ng-Win
 
       - name: Upload portable prototype
         uses: actions/upload-artifact@v4
         with:
-          name: chiaki-ng-PSN-native-batch-v3-win64
-          path: chiaki-ng-PSN-native-batch-v3-win64.zip
+          name: chiaki-ng-full-cycle-v4-win64
+          path: chiaki-ng-full-cycle-v4-win64.zip
           if-no-files-found: error
           retention-days: 7
