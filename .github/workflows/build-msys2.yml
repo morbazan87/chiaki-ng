@@ -1,4 +1,4 @@
-name: Build Chiaki-ng Windows - Full-Cycle Speed Test v4
+name: Build Chiaki-ng Windows - Multi-Speed Native Text v5
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-windows_x64-msys2:
-    name: Build Windows x64 Full-Cycle Speed Test v4
+    name: Build Windows x64 Multi-Speed Native Text v5
     runs-on: windows-latest
     defaults:
       run:
@@ -1442,6 +1442,94 @@ jobs:
           print('Full-cycle v4 patch complete (temporary GitHub runner checkout only).')
           PY
 
+      - name: Inject opt-in six-speed text testing v5 (temporary checkout)
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          cppp=Path('gui/src/streamsession.cpp')
+          hppp=Path('gui/include/streamsession.h')
+          cpp=cppp.read_text(encoding='utf-8')
+          hpp=hppp.read_text(encoding='utf-8')
+          def replace(source,old,new,label):
+              n=source.count(old)
+              if n!=1: raise RuntimeError(f'V5 {label}: expected exactly one anchor, found {n}')
+              print('V5 verified:',label)
+              return source.replace(old,new,1)
+          hpp=replace(hpp,'#include <QElapsedTimer>',
+              '#include <QElapsedTimer>\n#include <QComboBox>','Qt selector include')
+          hpp=replace(hpp,'QElapsedTimer ug79_v4_clock;', '''QElapsedTimer ug79_v4_clock;
+              int ug79_v5_reopen_delay_ms = 850;
+              int ug79_v5_right_cross_delay_ms = 620;
+              QString ug79_v5_profile_name = QStringLiteral("P0_850_620");
+              QPointer<QComboBox> ug79_v5_profile_selector;''','profile state')
+          cpp=replace(cpp,'QTimer::singleShot(850, this,',
+              'QTimer::singleShot(ug79_v5_reopen_delay_ms, this,','configurable reopen')
+          cpp=replace(cpp,'QTimer::singleShot(620, this,',
+              'QTimer::singleShot(ug79_v5_right_cross_delay_ms, this,','configurable Right-to-Cross')
+          cpp=replace(cpp,'QStringLiteral("Chiaki v4 - Full-Cycle Speed Test (PS4 Bedrock)")',
+              '''(qEnvironmentVariable("CHIAKI_KB_SPEED_PROFILES") == QStringLiteral("1")
+                  ? QStringLiteral("Chiaki v5 - Multi-Speed Native Text (PS4 Bedrock)")
+                  : QStringLiteral("Chiaki v4 - Full-Cycle Speed Test (PS4 Bedrock)"))''','opt-in title')
+          selector='''auto *speedProfile = new QComboBox(dialog);
+              speedProfile->addItems(QStringList{
+                  QStringLiteral("P0 BASELINE 850 / 620 ms (V4 proven)"),
+                  QStringLiteral("P1 GENTLE 600 / 620 ms"),
+                  QStringLiteral("P2 MODERATE 400 / 620 ms"),
+                  QStringLiteral("P3 FAST 400 / 400 ms"),
+                  QStringLiteral("P4 VERY FAST 250 / 300 ms (unproven)"),
+                  QStringLiteral("P5 LIMIT 150 / 200 ms (unproven)")
+              });
+              speedProfile->setCurrentIndex(0);
+              ug79_v5_profile_selector = speedProfile;
+              if(qEnvironmentVariable("CHIAKI_KB_SPEED_PROFILES") == QStringLiteral("1"))
+              {
+                  auto *speedNotice = new QLabel(QStringLiteral(
+                      "Choose one profile per /say batch. Timings are reopen delay / Right-to-Cross pause. "
+                      "Check ALL commands in Minecraft after EVERY run. Aggressive speeds may miss commands. "
+                      "Stop immediately on missing or out-of-order messages."),dialog);
+                  speedNotice->setWordWrap(true);
+                  layout->addWidget(speedNotice);
+                  layout->addWidget(speedProfile);
+              }
+              auto *row=new QHBoxLayout();'''
+          cpp=replace(cpp,'auto *row=new QHBoxLayout();',selector,'six-speed selection')
+          cpp=replace(cpp,'[this,lines,repeats,status]() {',
+              '[this,lines,repeats,status,speedProfile]() {','profile capture')
+          snapshot='''static const int reopen_ms[6] = {850,600,400,400,250,150};
+              static const int pause_ms[6] = {620,620,620,400,300,200};
+              int chosen = qEnvironmentVariable("CHIAKI_KB_SPEED_PROFILES") == QStringLiteral("1")
+                  ? speedProfile->currentIndex() : 0;
+              if(chosen < 0 || chosen >= 6) chosen = 0;
+              ug79_v5_reopen_delay_ms = reopen_ms[chosen];
+              ug79_v5_right_cross_delay_ms = pause_ms[chosen];
+              ug79_v5_profile_name = QStringLiteral("P%1_%2_%3")
+                  .arg(chosen).arg(ug79_v5_reopen_delay_ms).arg(ug79_v5_right_cross_delay_ms);
+              if(ug79_v5_profile_selector) ug79_v5_profile_selector->setEnabled(false);
+              ug79_v4_clock.start();
+              Ug79V4Log("PROFILE_SELECTED");'''
+          cpp=replace(cpp,'ug79_v4_clock.start();',snapshot,'snapshot chosen speed')
+          cpp=replace(cpp,'" event=" + event + "\\n";',
+              '" profile=" + ug79_v5_profile_name.toUtf8() + " event=" + event + "\\n";','per-event profile logging')
+          rate_status='''ug79_batch_status->setText(
+                  (qEnvironmentVariable("CHIAKI_KB_SPEED_PROFILES") == QStringLiteral("1")
+                   && reason.startsWith(QStringLiteral("Queue complete:"))
+                   && ug79_v4_clock.isValid() && ug79_v4_clock.elapsed() > 0
+                   && ug79_batch_index > 0)
+                  ? reason + QStringLiteral("\\n%1 | %2 commands in %3 ms = %4 commands/min. "
+                      "Protocol completion only: verify Minecraft chat.")
+                      .arg(ug79_v5_profile_name).arg(ug79_batch_index).arg(ug79_v4_clock.elapsed())
+                      .arg(60000.0 * ug79_batch_index / double(ug79_v4_clock.elapsed()),0,'f',2)
+                  : reason);
+              if(ug79_v5_profile_selector)
+                  ug79_v5_profile_selector->setEnabled(true);'''
+          cpp=replace(cpp,'ug79_batch_status->setText(reason);',rate_status,'live throughput and selector reset')
+          cpp=replace(cpp,'ug79_batch_status=nullptr;',
+              'ug79_batch_status=nullptr;\n        ug79_v5_profile_selector=nullptr;','safe selector cleanup')
+          cppp.write_text(cpp,encoding='utf-8')
+          hppp.write_text(hpp,encoding='utf-8')
+          print('V5 six profiles injected. V3/V4 timings default to baseline unless V5 launcher is used.')
+          PY
+
       - name: Build libplacebo
         run: |
           scripts/build-libplacebo-windows.sh
@@ -1491,6 +1579,7 @@ jobs:
               'TEST-Native-Text-v2.cmd': ('both', 'KBPROBE-NativeText-v2.log'),
               'TEST-Native-Batch-v3.cmd': ('both', 'KBPROBE-NativeBatch-v3.log'),
               'TEST-Full-Cycle-v4.cmd': ('both', 'KBPROBE-FullCycle-v4.log'),
+              'TEST-MultiSpeed-v5.cmd': ('both', 'KBPROBE-MultiSpeed-v5.log'),
           }
           for filename, (mode, logfile) in launchers.items():
               commands = [
@@ -1499,9 +1588,10 @@ jobs:
                   'set "VK_LOADER_DRIVERS_DISABLE=*dzn*"',
                   f'set "CHIAKI_KB_PROBE={mode}"',
                   f'set "CHIAKI_KB_DIAG_LOG=%~dp0{logfile}"',
-                  'set "CHIAKI_KB_BATCH=1"' if filename in ('TEST-Native-Batch-v3.cmd', 'TEST-Full-Cycle-v4.cmd') else 'set "CHIAKI_KB_BATCH=0"',
-                  'set "CHIAKI_KB_FULLCYCLE=1"' if filename == 'TEST-Full-Cycle-v4.cmd' else 'set "CHIAKI_KB_FULLCYCLE=0"',
-                  'start "" "%~dp0chiaki.exe"',
+                  'set "CHIAKI_KB_BATCH=1"' if filename in ('TEST-Native-Batch-v3.cmd', 'TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd') else 'set "CHIAKI_KB_BATCH=0"',
+                  'set "CHIAKI_KB_FULLCYCLE=1"' if filename in ('TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd') else 'set "CHIAKI_KB_FULLCYCLE=0"',
+                  'set "CHIAKI_KB_SPEED_PROFILES=1"' if filename == 'TEST-MultiSpeed-v5.cmd' else 'set "CHIAKI_KB_SPEED_PROFILES=0"',
+              'start "" "%~dp0chiaki.exe"',
               ]
               (folder / filename).write_bytes(('\r\n'.join(commands) + '\r\n').encode('utf-8'))
           (folder / 'READ-ME-KEYBOARD-TEST.txt').write_text(
@@ -1527,6 +1617,10 @@ jobs:
               '19. In normal Minecraft gameplay, click Start Full Cycle to automatically open chat for the FIRST command.\n'
               '20. V4 test permits /say only (max 40); log KBPROBE-FullCycle-v4.log contains KB_V4_MS timestamps.\n'
               '21. V4 is experimental. Stop on any unexpected behaviour; source files and V3 remain unchanged.\n',
+              '22. V5: TEST-MultiSpeed-v5.cmd contains SIX per-batch selectable timings.\n',
+              '23. Run /say only. Check all Minecraft messages and order before trying a faster profile.\n',
+              '24. V5 writes profile-tagged KBPROBE-MultiSpeed-v5.log millisecond timing data.\n',
+              '25. V5 shows commands/min after each completed run; protocol acknowledgments do not verify game execution.\n',
               encoding='utf-8',
           )
           print('PSN keyboard experiment launchers generated.')
@@ -1534,12 +1628,12 @@ jobs:
 
       - name: Package portable prototype
         run: |
-          zip -r chiaki-ng-full-cycle-v4-win64.zip chiaki-ng-Win
+          zip -r chiaki-ng-multi-speed-v5-win64.zip chiaki-ng-Win
 
       - name: Upload portable prototype
         uses: actions/upload-artifact@v4
         with:
-          name: chiaki-ng-full-cycle-v4-win64
-          path: chiaki-ng-full-cycle-v4-win64.zip
+          name: chiaki-ng-multi-speed-v5-win64
+          path: chiaki-ng-multi-speed-v5-win64.zip
           if-no-files-found: error
           retention-days: 7
