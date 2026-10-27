@@ -1595,7 +1595,7 @@ jobs:
               ]
               (folder / filename).write_bytes(('\r\n'.join(commands) + '\r\n').encode('utf-8'))
           (folder / 'READ-ME-KEYBOARD-TEST.txt').write_text(
-              'PSN KEYBOARD DIAGNOSTIC EXPERIMENT - NOT A WORKING DIRECT TYPING BUILD\n'
+              'PS4 NATIVE TEXT TESTING - experimental v5, plus previous diagnostic launchers\n'
               '1. Extract this portable ZIP to its own folder. Do not replace a working Chiaki folder.\n'
               '2. Close other Chiaki windows before testing.\n'
               '3. Launch-KB-Observe.cmd is the safe baseline. It sends NO keyboard negotiation messages.\n'
@@ -1616,10 +1616,10 @@ jobs:
               '18. V4: TEST-Full-Cycle-v4.cmd shows the setup panel after Chiaki connects; do not manually open chat.\n'
               '19. In normal Minecraft gameplay, click Start Full Cycle to automatically open chat for the FIRST command.\n'
               '20. V4 test permits /say only (max 40); log KBPROBE-FullCycle-v4.log contains KB_V4_MS timestamps.\n'
-              '21. V4 is experimental. Stop on any unexpected behaviour; source files and V3 remain unchanged.\n',
-              '22. V5: TEST-MultiSpeed-v5.cmd contains SIX per-batch selectable timings.\n',
-              '23. Run /say only. Check all Minecraft messages and order before trying a faster profile.\n',
-              '24. V5 writes profile-tagged KBPROBE-MultiSpeed-v5.log millisecond timing data.\n',
+              '21. V4 is experimental. Stop on any unexpected behaviour; source files and V3 remain unchanged.\n'
+              '22. V5: TEST-MultiSpeed-v5.cmd contains SIX per-batch selectable timings.\n'
+              '23. Run /say only. Check all Minecraft messages and order before trying a faster profile.\n'
+              '24. V5 writes profile-tagged KBPROBE-MultiSpeed-v5.log millisecond timing data.\n'
               '25. V5 shows commands/min after each completed run; protocol acknowledgments do not verify game execution.\n',
               encoding='utf-8',
           )
