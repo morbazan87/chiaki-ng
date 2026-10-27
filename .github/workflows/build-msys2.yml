@@ -1455,8 +1455,8 @@ jobs:
               if n!=1: raise RuntimeError(f'V5 {label}: expected exactly one anchor, found {n}')
               print('V5 verified:',label)
               return source.replace(old,new,1)
-          hpp=replace(hpp,'#include <QElapsedTimer>',
-              '#include <QElapsedTimer>\n#include <QComboBox>','Qt selector include')
+          hpp=replace(hpp,'#include <QStringList>',
+              '#include <QStringList>\n#include <QComboBox>','Qt selector include (unique v3 header anchor)')
           hpp=replace(hpp,'QElapsedTimer ug79_v4_clock;', '''QElapsedTimer ug79_v4_clock;
               int ug79_v5_reopen_delay_ms = 850;
               int ug79_v5_right_cross_delay_ms = 620;
