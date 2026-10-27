@@ -1,4 +1,4 @@
-name: Build Chiaki-ng Windows - Multi-Speed Native Text v5
+name: Build Chiaki-ng Windows - Bedrock Speed-Build v6
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-windows_x64-msys2:
-    name: Build Windows x64 Multi-Speed Native Text v5
+    name: Build Windows x64 Bedrock Speed-Build v6
     runs-on: windows-latest
     defaults:
       run:
@@ -1530,6 +1530,72 @@ jobs:
           print('V5 six profiles injected. V3/V4 timings default to baseline unless V5 launcher is used.')
           PY
 
+      - name: Inject opt-in Bedrock speed-building test v6 (temporary checkout)
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          cppp=Path('gui/src/streamsession.cpp')
+          cpp=cppp.read_text(encoding='utf-8')
+          def patch(old,new,what):
+              global cpp
+              n=cpp.count(old)
+              if n != 1:
+                  raise RuntimeError(f'V6 {what}: expected exactly one source anchor, found {n}')
+              cpp=cpp.replace(old,new,1)
+              print('V6 verified:',what)
+
+          # Only the V6 launcher may use supported Bedrock construction commands; legacy V5 stays /say-only.
+          patch('if(!command.startsWith(QStringLiteral("/say ")) || utf8.size()>80)',
+              '''const bool v6_build = qEnvironmentVariable("CHIAKI_KB_BUILD_TEST") == QStringLiteral("1");
+                            const bool permitted = command.startsWith(QStringLiteral("/say ")) ||
+                                (v6_build && (command.startsWith(QStringLiteral("/fill ")) ||
+                                              command.startsWith(QStringLiteral("/setblock ")) ||
+                                              command.startsWith(QStringLiteral("/clone ")) ||
+                                              command.startsWith(QStringLiteral("/structure save ")) ||
+                                              command.startsWith(QStringLiteral("/structure load "))));
+                            if(!permitted || utf8.size()>80)''', 'opt-in Bedrock command whitelist')
+          patch('status->setText(QStringLiteral("Speed test only: use /say commands, each at most 80 UTF-8 bytes."));',
+              '''status->setText(v6_build
+                                ? QStringLiteral("V6: /fill, /setblock, /clone, /structure save/load or /say; max 80 UTF-8 bytes.")
+                                : QStringLiteral("Speed test only: use /say commands, each at most 80 UTF-8 bytes."));''',
+              'accurate opt-in validation message')
+
+          # P4 and P5 were observed to fail PS4 chat opening. No destructive tests at those speeds.
+          patch('''ug79_batch_commands.clear();
+                            for(int i=0;i<repeats->value();++i)''',
+              '''if(qEnvironmentVariable("CHIAKI_KB_BUILD_TEST") == QStringLiteral("1") &&
+                               speedProfile->currentIndex() > 3)
+                            {
+                                status->setText(QStringLiteral(
+                                    "V6 BUILD TEST: use P0-P3 only. P4/P5 failed the keyboard-opening tests."));
+                                return;
+                            }
+                            ug79_batch_commands.clear();
+                            for(int i=0;i<repeats->value();++i)''',
+              'block failed P4/P5 timings before arming build batch')
+
+          # Maintain distinguishable V5 and V6 windows for safer operation.
+          patch('QStringLiteral("Chiaki v5 - Multi-Speed Native Text (PS4 Bedrock)")',
+              '''(qEnvironmentVariable("CHIAKI_KB_BUILD_TEST") == QStringLiteral("1")
+                                ? QStringLiteral("Chiaki v6 - Bedrock Speed-Build (PS4)")
+                                : QStringLiteral("Chiaki v5 - Multi-Speed Native Text (PS4 Bedrock)"))''',
+              'dedicated build-testing title')
+          patch('layout->addWidget(speedProfile);',
+              '''layout->addWidget(speedProfile);
+                            if(qEnvironmentVariable("CHIAKI_KB_BUILD_TEST") == QStringLiteral("1"))
+                            {
+                                auto *notice = new QLabel(QStringLiteral(
+                                    "BEDROCK BUILD TEST (changes your world): /fill, /setblock, /clone, /structure save/load and /say. "
+                                    "Use a BACKUP / test world, creative mode and cheats. "
+                                    "Start with P0, then P3. P4/P5 are blocked for construction. "
+                                    "Verify each completed command inside Minecraft; protocol replies are not execution proof."),dialog);
+                                notice->setWordWrap(true);
+                                layout->addWidget(notice);
+                            }''', 'prominent PS4 building safety guidance')
+          cppp.write_text(cpp,encoding='utf-8')
+          print('V6 completed: Opt-in building whitelist, P0-P3 only, older launchers preserved.')
+          PY
+
       - name: Build libplacebo
         run: |
           scripts/build-libplacebo-windows.sh
@@ -1580,6 +1646,7 @@ jobs:
               'TEST-Native-Batch-v3.cmd': ('both', 'KBPROBE-NativeBatch-v3.log'),
               'TEST-Full-Cycle-v4.cmd': ('both', 'KBPROBE-FullCycle-v4.log'),
               'TEST-MultiSpeed-v5.cmd': ('both', 'KBPROBE-MultiSpeed-v5.log'),
+              'TEST-Bedrock-SpeedBuild-v6.cmd': ('both', 'KBPROBE-Bedrock-SpeedBuild-v6.log'),
           }
           for filename, (mode, logfile) in launchers.items():
               commands = [
@@ -1588,10 +1655,11 @@ jobs:
                   'set "VK_LOADER_DRIVERS_DISABLE=*dzn*"',
                   f'set "CHIAKI_KB_PROBE={mode}"',
                   f'set "CHIAKI_KB_DIAG_LOG=%~dp0{logfile}"',
-                  'set "CHIAKI_KB_BATCH=1"' if filename in ('TEST-Native-Batch-v3.cmd', 'TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd') else 'set "CHIAKI_KB_BATCH=0"',
-                  'set "CHIAKI_KB_FULLCYCLE=1"' if filename in ('TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd') else 'set "CHIAKI_KB_FULLCYCLE=0"',
-                  'set "CHIAKI_KB_SPEED_PROFILES=1"' if filename == 'TEST-MultiSpeed-v5.cmd' else 'set "CHIAKI_KB_SPEED_PROFILES=0"',
-              'start "" "%~dp0chiaki.exe"',
+                  'set "CHIAKI_KB_BATCH=1"' if filename in ('TEST-Native-Batch-v3.cmd', 'TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd') else 'set "CHIAKI_KB_BATCH=0"',
+                  'set "CHIAKI_KB_FULLCYCLE=1"' if filename in ('TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd') else 'set "CHIAKI_KB_FULLCYCLE=0"',
+                  'set "CHIAKI_KB_SPEED_PROFILES=1"' if filename in ('TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd') else 'set "CHIAKI_KB_SPEED_PROFILES=0"',
+                  'set "CHIAKI_KB_BUILD_TEST=1"' if filename == 'TEST-Bedrock-SpeedBuild-v6.cmd' else 'set "CHIAKI_KB_BUILD_TEST=0"',
+                  'start "" "%~dp0chiaki.exe"',
               ]
               (folder / filename).write_bytes(('\r\n'.join(commands) + '\r\n').encode('utf-8'))
           (folder / 'READ-ME-KEYBOARD-TEST.txt').write_text(
@@ -1620,7 +1688,13 @@ jobs:
               '22. V5: TEST-MultiSpeed-v5.cmd contains SIX per-batch selectable timings.\n'
               '23. Run /say only. Check all Minecraft messages and order before trying a faster profile.\n'
               '24. V5 writes profile-tagged KBPROBE-MultiSpeed-v5.log millisecond timing data.\n'
-              '25. V5 shows commands/min after each completed run; protocol acknowledgments do not verify game execution.\n',
+              '25. V5 shows commands/min after each completed run; protocol acknowledgments do not verify game execution.\n'
+              '26. V6: TEST-Bedrock-SpeedBuild-v6.cmd enables /fill, /setblock, /clone, /structure save/load.\n'
+              '27. V6: Create a BACKUP or use an empty TEST WORLD first; commands change Minecraft blocks.\n'
+              '28. V6: Minecraft Creative and cheats required; verify ALL world changes and actual execution.\n'
+              '29. V6: Select P0 for baseline then P3; P4/P5 are blocked for building tests.\n'
+              '30. V6: Limit 40 commands per batch, 80 UTF-8 bytes each; restricted allowlist.\n'
+              '31. V6: Writes KBPROBE-Bedrock-SpeedBuild-v6.log; game-side correctness requires human verification.\n',
               encoding='utf-8',
           )
           print('PSN keyboard experiment launchers generated.')
@@ -1628,12 +1702,12 @@ jobs:
 
       - name: Package portable prototype
         run: |
-          zip -r chiaki-ng-multi-speed-v5-win64.zip chiaki-ng-Win
+          zip -r chiaki-ng-bedrock-speed-build-v6-win64.zip chiaki-ng-Win
 
       - name: Upload portable prototype
         uses: actions/upload-artifact@v4
         with:
-          name: chiaki-ng-multi-speed-v5-win64
-          path: chiaki-ng-multi-speed-v5-win64.zip
+          name: chiaki-ng-bedrock-speed-build-v6-win64
+          path: chiaki-ng-bedrock-speed-build-v6-win64.zip
           if-no-files-found: error
           retention-days: 7
