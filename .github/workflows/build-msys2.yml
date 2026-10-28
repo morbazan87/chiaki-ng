@@ -1975,7 +1975,7 @@ jobs:
                   QTimer::singleShot(1100,this,[this]() {
                       if(!ug79_v7_running || !ug79_v7_recovering)return;
                       const bool gameplay=Ug79V7LooksLikeGameplay();
-                      Ug79V4Log("V7_3_RECOVERY_HUD_CHECK "+ug79_v7_recovery_diag);
+                      Ug79V4Log((QStringLiteral("V7_3_RECOVERY_HUD_CHECK ")+ug79_v7_recovery_diag).toUtf8().constData());
                       if(gameplay)
                       {
                           ug79_v7_recovery_fail_streak=0;
@@ -2258,12 +2258,17 @@ jobs:
           cpp=replace_once(cpp,'ug79KbV2Log("KB_V4_FULLCYCLE_PANEL_SHOWN");',
               '''if(qEnvironmentVariable("CHIAKI_KB_AUTO_VERIFY") == QStringLiteral("1"))
               {
+                  dialog->setWindowTitle(QStringLiteral("Chiaki v7.3 - Bedrock Auto Verifier"));
+                  // The v4-v6 diagnostic widgets are not needed in this opt-in UI.
+                  // They stay compiled because the v7.3 engine uses those backends.
+                  for(QWidget *legacy : dialog->findChildren<QWidget*>())
+                      legacy->hide();
                   auto *autoInfo = new QLabel(QStringLiteral(
                       "V7 UNATTENDED TEST (test world only): 32 relative-position blocks are rebuilt "
                       "for each trial. /execute if blocks verifies them IN GAME and displays a "
                       "GREEN PASS or RED FAIL title. Calibrated glyph matcher reads the title. "
                       "Keep Chiaki video unobscured and do not move the player or camera. "
-                      "Before building, auto-calibrates red, green, then red negative control. "
+                      "Before building, auto-calibrates red, green, red, then cyan controls. "
                       "Recoverable errors are recorded and the next trial is attempted after safe UI recovery. "
                       "Coarse 2D timing scan, then 1 ms searches around best measured successes. "),dialog);
                   autoInfo->setWordWrap(true);
@@ -2335,75 +2340,28 @@ jobs:
         run: |
           printf '@echo off\r\nset "VK_LOADER_DRIVERS_DISABLE=*dzn*"\r\nstart "" "%%~dp0chiaki.exe"\r\n' > chiaki-ng-Win/Launch-UG79.cmd
 
-      - name: Add explicit diagnostic launchers and safety notes
+      - name: Add current v7.3 verifier launcher only
         run: |
           python - <<'PY'
           from pathlib import Path
           folder = Path('chiaki-ng-Win')
           folder.mkdir(exist_ok=True)
-          launchers = {
-              'Launch-KB-Observe.cmd': ('off', 'KBPROBE-Observe.log'),
-              'TEST-KB-Enable-RISK-Disconnect.cmd': ('enable', 'KBPROBE-Enable.log'),
-              'TEST-KB-Toggle-RISK-Disconnect.cmd': ('toggle', 'KBPROBE-Toggle.log'),
-              'TEST-KB-Both-RISK-Disconnect.cmd': ('both', 'KBPROBE-Both.log'),
-              'TEST-Native-Text-v2.cmd': ('both', 'KBPROBE-NativeText-v2.log'),
-              'TEST-Native-Batch-v3.cmd': ('both', 'KBPROBE-NativeBatch-v3.log'),
-              'TEST-Full-Cycle-v4.cmd': ('both', 'KBPROBE-FullCycle-v4.log'),
-              'TEST-MultiSpeed-v5.cmd': ('both', 'KBPROBE-MultiSpeed-v5.log'),
-              'TEST-Bedrock-SpeedBuild-v6.cmd': ('both', 'KBPROBE-Bedrock-SpeedBuild-v6.log'),
-              'TEST-Bedrock-AutoVerify-v7-3.cmd': ('both', 'KBPROBE-Bedrock-AutoVerify-v7-3.log'),
-          }
-          for filename, (mode, logfile) in launchers.items():
-              commands = [
-                  '@echo off',
-                  'cd /d "%~dp0"',
-                  'set "VK_LOADER_DRIVERS_DISABLE=*dzn*"',
-                  f'set "CHIAKI_KB_PROBE={mode}"',
-                  f'set "CHIAKI_KB_DIAG_LOG=%~dp0{logfile}"',
-                  'set "CHIAKI_KB_BATCH=1"' if filename in ('TEST-Native-Batch-v3.cmd', 'TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd', 'TEST-Bedrock-AutoVerify-v7-3.cmd') else 'set "CHIAKI_KB_BATCH=0"',
-                  'set "CHIAKI_KB_FULLCYCLE=1"' if filename in ('TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd', 'TEST-Bedrock-AutoVerify-v7-3.cmd') else 'set "CHIAKI_KB_FULLCYCLE=0"',
-                  'set "CHIAKI_KB_SPEED_PROFILES=1"' if filename in ('TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd', 'TEST-Bedrock-AutoVerify-v7-3.cmd') else 'set "CHIAKI_KB_SPEED_PROFILES=0"',
-                  'set "CHIAKI_KB_BUILD_TEST=1"' if filename == 'TEST-Bedrock-SpeedBuild-v6.cmd' else 'set "CHIAKI_KB_BUILD_TEST=0"',
-                  'set "CHIAKI_KB_AUTO_VERIFY=1"' if filename == 'TEST-Bedrock-AutoVerify-v7-3.cmd' else 'set "CHIAKI_KB_AUTO_VERIFY=0"',
-                  'start "" "%~dp0chiaki.exe"',
-              ]
-              (folder / filename).write_bytes(('\r\n'.join(commands) + '\r\n').encode('utf-8'))
-          (folder / 'READ-ME-KEYBOARD-TEST.txt').write_text(
-              'PS4 NATIVE TEXT TESTING - experimental v5, plus previous diagnostic launchers\n'
-              '1. Extract this portable ZIP to its own folder. Do not replace a working Chiaki folder.\n'
-              '2. Close other Chiaki windows before testing.\n'
-              '3. Launch-KB-Observe.cmd is the safe baseline. It sends NO keyboard negotiation messages.\n'
-              '4. The TEST-KB-* launchers deliberately send experimental messages and MAY DISCONNECT REMOTE PLAY.\n'
-              '5. Keyboard probes are disabled by default, and the Minecraft controller tools remain present.\n'
-              '6. Each launcher writes a separate KBPROBE-*.log file in this extracted folder.\n'
-              '7. Do not enable verbose packet dumps or publish credentials/tokens/session IDs.\n'
-              '8. A SENT_TO_TRANSPORT line is NOT proof that the PlayStation accepted a message.\n'
-              '9. Do not run any TEST-KB launcher unless you are prepared for possible disconnection.\n'
-              '10. v2: TEST-Native-Text-v2.cmd opens an opt-in Windows text dialog when PS4 sends KEYBOARD_OPEN.\n'
-              '11. v2: First click Send Text with hello123 and inspect Minecraft; then click Accept / Done.\n'
-              '12. v2: The text content is never placed in KBPROBE diagnostic logs.\n'
-              '13. v3: TEST-Native-Batch-v3.cmd opens a bounded queued command dialog when PS4 keyboard first opens.\n'
-              '14. Open Minecraft chat and keyboard manually once; paste one slash-command per line, then click Start Batch.\n'
-              '15. v3 sends each command, awaits PS4 text response, accepts, awaits close, then taps RIGHT and CROSS to reopen.\n'
-              '16. STOP Batch and timeouts halt the automation. Max 40 total commands per batch.\n'
-              '17. Use harmless /say tests first; protocol replies do not prove Minecraft executed commands.\n'
-              '18. V4: TEST-Full-Cycle-v4.cmd shows the setup panel after Chiaki connects; do not manually open chat.\n'
-              '19. In normal Minecraft gameplay, click Start Full Cycle to automatically open chat for the FIRST command.\n'
-              '20. V4 test permits /say only (max 40); log KBPROBE-FullCycle-v4.log contains KB_V4_MS timestamps.\n'
-              '21. V4 is experimental. Stop on any unexpected behaviour; source files and V3 remain unchanged.\n'
-              '22. V5: TEST-MultiSpeed-v5.cmd contains SIX per-batch selectable timings.\n'
-              '23. Run /say only. Check all Minecraft messages and order before trying a faster profile.\n'
-              '24. V5 writes profile-tagged KBPROBE-MultiSpeed-v5.log millisecond timing data.\n'
-              '25. V5 shows commands/min after each completed run; protocol acknowledgments do not verify game execution.\n'
-              '26. V6: TEST-Bedrock-SpeedBuild-v6.cmd enables /fill, /setblock, /clone, /structure save/load.\n'
-              '27. V6: Create a BACKUP or use an empty TEST WORLD first; commands change Minecraft blocks.\n'
-              '28. V6: Minecraft Creative and cheats required; verify ALL world changes and actual execution.\n'
-              '29. V6: Select P0 for baseline then P3; P4/P5 are blocked for building tests.\n'
-              '30. V6: Limit 40 commands per batch, 80 UTF-8 bytes each; restricted allowlist.\n'
-              '31. V6: Writes KBPROBE-Bedrock-SpeedBuild-v6.log; game-side correctness requires human verification.\n',
-              encoding='utf-8',
-          )
-          print('PSN keyboard experiment launchers generated.')
+          commands = [
+              '@echo off',
+              'cd /d "%~dp0"',
+              'set "VK_LOADER_DRIVERS_DISABLE=*dzn*"',
+              'set "CHIAKI_KB_PROBE=both"',
+              'set "CHIAKI_KB_DIAG_LOG=%~dp0KBPROBE-Bedrock-AutoVerify-v7-3.log"',
+              'set "CHIAKI_KB_BATCH=1"',
+              'set "CHIAKI_KB_FULLCYCLE=1"',
+              'set "CHIAKI_KB_SPEED_PROFILES=1"',
+              'set "CHIAKI_KB_BUILD_TEST=0"',
+              'set "CHIAKI_KB_AUTO_VERIFY=1"',
+              'start "" "%~dp0chiaki.exe"',
+          ]
+          (folder / 'TEST-Bedrock-AutoVerify-v7-3.cmd').write_bytes(
+              ('\r\n'.join(commands) + '\r\n').encode('utf-8'))
+          print('Created only the current v7.3 verification launcher.')
           PY
 
       - name: Add V7.3 unattended test instructions
