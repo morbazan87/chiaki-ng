@@ -1,4 +1,4 @@
-name: Build Chiaki-ng Windows - Resilient AutoVerify v7.2
+name: Build Chiaki-ng Windows - Resilient AutoVerify v7.3
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-windows_x64-msys2:
-    name: Build Windows x64 Bedrock Resilient Verifier v7.2
+    name: Build Windows x64 Bedrock Resilient Verifier v7.3
     runs-on: windows-latest
     defaults:
       run:
@@ -1596,7 +1596,7 @@ jobs:
           print('V6 completed: Opt-in building whitelist, P0-P3 only, older launchers preserved.')
           PY
 
-      - name: Inject opt-in v7.2 resilient calibrated 1ms search verifier (temporary checkout)
+      - name: Inject opt-in v7.3 resilient calibrated 1ms search verifier (temporary checkout)
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -1622,14 +1622,18 @@ jobs:
               int ug79_v7_uncertain = 0;
               QImage ug79_v7_baseline;
               QImage ug79_v7_green_template;
+              QImage ug79_v7_cyan_template;
               QImage ug79_v7_red_template;
               QRect ug79_v7_green_rect;
+              QRect ug79_v7_cyan_rect;
               QRect ug79_v7_red_rect;
+              bool ug79_v7_expect_cyan=false;
+              mutable QString ug79_v7_recovery_diag;
               QPointer<QLabel> ug79_v7_status;
               QImage Ug79V7Capture() const;
-              QImage Ug79V7Mask(const QImage &frame, bool green) const;
-              bool Ug79V7Learn(const QImage &frame, bool green);
-              bool Ug79V7Match(const QImage &frame, bool green) const;
+              QImage Ug79V7Mask(const QImage &frame, int hue) const;
+              bool Ug79V7Learn(const QImage &frame, int hue);
+              bool Ug79V7Match(const QImage &frame, int hue) const;
               void Ug79V7Start();
               void Ug79V7Control(int stage);
               void Ug79V7ControlObserve();
@@ -1684,10 +1688,9 @@ jobs:
 
           // Extract the relevant changed red or green title glyph pixels, not all
           // green pixels in the scene. The centre crop rejects peripheral scenery/UI.
-          QImage StreamSession::Ug79V7Mask(const QImage &frame, bool green) const
+          QImage StreamSession::Ug79V7Mask(const QImage &frame, int hue) const
           {
-              if(frame.isNull() || frame.size()!=ug79_v7_baseline.size())
-                  return QImage();
+              if(frame.isNull() || frame.size()!=ug79_v7_baseline.size()) return QImage();
               QImage mask(frame.size(),QImage::Format_Grayscale8);
               mask.fill(0);
               for(int y=frame.height()*35/100;y<frame.height()*62/100;++y)
@@ -1697,23 +1700,25 @@ jobs:
                   {
                       const QColor now(frame.pixel(x,y));
                       const QColor old(ug79_v7_baseline.pixel(x,y));
-                      const int change=qAbs(now.red()-old.red())+
-                          qAbs(now.green()-old.green())+qAbs(now.blue()-old.blue());
-                      if(change<110)
-                          continue;
-                      if(green ? (now.green()>155 && now.green()>now.red()*1.45 &&
-                                  now.green()>now.blue()*1.35)
-                               : (now.red()>155 && now.red()>now.green()*1.45 &&
-                                  now.red()>now.blue()*1.35))
+                      const int delta=qAbs(now.red()-old.red())+qAbs(now.green()-old.green())+
+                          qAbs(now.blue()-old.blue());
+                      if(delta<110) continue;
+                      const bool red=now.red()>155 && now.red()>now.green()*1.45 &&
+                          now.red()>now.blue()*1.35;
+                      const bool green=now.green()>155 && now.green()>now.red()*1.45 &&
+                          now.green()>now.blue()*1.35;
+                      const bool cyan=now.blue()>155 && now.green()>155 &&
+                          now.blue()>now.red()*1.45 && now.green()>now.red()*1.45;
+                      if((hue==0 && red) || (hue==1 && green) || (hue==2 && cyan))
                           line[x]=255;
                   }
               }
               return mask;
           }
 
-          bool StreamSession::Ug79V7Learn(const QImage &frame, bool green)
+          bool StreamSession::Ug79V7Learn(const QImage &frame, int hue)
           {
-              const QImage mask=Ug79V7Mask(frame,green);
+              const QImage mask=Ug79V7Mask(frame,hue);
               if(mask.isNull())return false;
               int left=mask.width(),right=-1,top=mask.height(),bottom=-1,count=0;
               for(int y=mask.height()*35/100;y<mask.height()*62/100;++y)
@@ -1727,51 +1732,41 @@ jobs:
                       top=qMin(top,y);bottom=qMax(bottom,y);
                   }
               }
-              // Require a real, compact word-shaped signature. A few coloured pixels
-              // or an entire coloured game scene is not an acceptable calibration.
               if(count<80 || right-left<26 || bottom-top<7 ||
-                 right-left>mask.width()/2 || bottom-top>mask.height()/4)
-                  return false;
+                 right-left>mask.width()/2 || bottom-top>mask.height()/4)return false;
               const QRect rect=QRect(QPoint(left,top),QPoint(right,bottom))
                   .adjusted(-5,-5,5,5).intersected(mask.rect());
-              if(green)
-              {
-                  ug79_v7_green_template=mask;
-                  ug79_v7_green_rect=rect;
-              }
-              else
-              {
-                  ug79_v7_red_template=mask;
-                  ug79_v7_red_rect=rect;
-              }
+              if(hue==2){ug79_v7_cyan_template=mask;ug79_v7_cyan_rect=rect;}
+              else if(hue==1){ug79_v7_green_template=mask;ug79_v7_green_rect=rect;}
+              else {ug79_v7_red_template=mask;ug79_v7_red_rect=rect;}
               return true;
           }
 
-          bool StreamSession::Ug79V7Match(const QImage &frame, bool green) const
+          bool StreamSession::Ug79V7Match(const QImage &frame, int hue) const
           {
-              const QImage &reference=green ? ug79_v7_green_template:ug79_v7_red_template;
-              const QRect &rect=green ? ug79_v7_green_rect:ug79_v7_red_rect;
+              const QImage &reference=hue==2?ug79_v7_cyan_template:
+                  (hue==1?ug79_v7_green_template:ug79_v7_red_template);
+              const QRect &rect=hue==2?ug79_v7_cyan_rect:
+                  (hue==1?ug79_v7_green_rect:ug79_v7_red_rect);
               if(reference.isNull() || !rect.isValid())return false;
-              const QImage actual=Ug79V7Mask(frame,green);
+              const QImage actual=Ug79V7Mask(frame,hue);
               if(actual.isNull() || actual.size()!=reference.size())return false;
               int expected=0,seen=0,overlap=0;
               for(int y=rect.top();y<=rect.bottom();++y)
               {
-                  const uchar *t=reference.constScanLine(y);
-                  const uchar *a=actual.constScanLine(y);
+                  const uchar *referenceLine=reference.constScanLine(y);
+                  const uchar *actualLine=actual.constScanLine(y);
                   for(int x=rect.left();x<=rect.right();++x)
                   {
-                      const bool want=t[x]!=0,got=a[x]!=0;
-                      expected+=want;seen+=got;overlap+=(want && got);
+                      const bool want=referenceLine[x]!=0,got=actualLine[x]!=0;
+                      expected+=want;seen+=got;overlap+=(want&&got);
                   }
               }
-              // Both sensitivity and specificity: background green alone won't match
-              // the calibrated shape of the word PASS. Reject partial/occluded titles.
               return expected>=80 && seen>=80 &&
-                     overlap*100>=expected*82 && overlap*100>=seen*82;
+                  overlap*100>=expected*82 && overlap*100>=seen*82;
           }
 
-          // V7.2 keeps failure observations; only unsafe/unknown recovery ends the run.
+          // V7.3 keeps failure observations; only unsafe/unknown recovery ends the run.
           void StreamSession::Ug79V7Report(const QString &outcome, const QString &details)
           {
               QString clean=details;
@@ -1784,7 +1779,7 @@ jobs:
                   .arg(ug79_v5_reopen_delay_ms).arg(ug79_v5_right_cross_delay_ms)
                   .arg(elapsed).arg(ug79_batch_index).arg(outcome).arg(clean);
               ug79_v7_rows << row;
-              const QString path=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG")+QStringLiteral(".v7-2-results.csv");
+              const QString path=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG")+QStringLiteral(".v7-3-results.csv");
               QFile out(path);
               if(out.open(QIODevice::WriteOnly|QIODevice::Append|QIODevice::Text))
               {
@@ -1803,28 +1798,52 @@ jobs:
           bool StreamSession::Ug79V7LooksLikeGameplay() const
           {
               const QImage now=Ug79V7Capture();
-              if(now.isNull() || now.size()!=ug79_v7_baseline.size() || ug79_batch_keyboard_open)
-                  return false;
-              // Two separated image regions must still resemble the pre-test gameplay.
-              // This rejects the full-screen PS4 keyboard and many menus/chat overlays.
+              if(now.isNull())
+              {ug79_v7_recovery_diag=QStringLiteral("no_video");return false;}
+              if(now.size()!=ug79_v7_baseline.size())
+              {ug79_v7_recovery_diag=QStringLiteral("video_dimensions_changed");return false;}
+              if(ug79_batch_keyboard_open)
+              {ug79_v7_recovery_diag=QStringLiteral("native_keyboard_open");return false;}
+              // Two stable HUD features: crosshair and hotbar, NOT changing scenery.
+              // Correlate gradient edges, not raw brightness: reject missing HUD/menu.
               const QRect regions[2]={
-                  QRect(now.width()*20/100,now.height()*7/100,now.width()*60/100,now.height()*16/100),
-                  QRect(now.width()*20/100,now.height()*74/100,now.width()*60/100,now.height()*18/100)
+                  QRect(now.width()*47/100,now.height()*47/100,
+                        now.width()*6/100,now.height()*6/100),
+                  QRect(now.width()*32/100,now.height()*90/100,
+                        now.width()*36/100,now.height()*8/100)
               };
-              for(const QRect &region:regions)
+              QString diagnostic;
+              for(int k=0;k<2;++k)
               {
-                  int same=0,total=0;
-                  for(int y=region.top();y<region.bottom();y+=8)
-                      for(int x=region.left();x<region.right();x+=8)
+                  const QRect rect=regions[k].intersected(now.rect().adjusted(0,0,-3,-3));
+                  int expected=0,matched=0;
+                  for(int y=rect.top();y<rect.bottom();y+=2)
+                      for(int x=rect.left();x<rect.right();x+=2)
                       {
-                          const QColor a(now.pixel(x,y)),b(ug79_v7_baseline.pixel(x,y));
-                          const int delta=qAbs(a.red()-b.red())+qAbs(a.green()-b.green())+
-                              qAbs(a.blue()-b.blue());
-                          ++total;
-                          if(delta<105)++same;
+                          const QColor a(now.pixel(x,y)),ar(now.pixel(x+2,y)),ad(now.pixel(x,y+2));
+                          const QColor b(ug79_v7_baseline.pixel(x,y));
+                          const QColor br(ug79_v7_baseline.pixel(x+2,y));
+                          const QColor bd(ug79_v7_baseline.pixel(x,y+2));
+                          const int al=(a.red()*3+a.green()*6+a.blue())/10;
+                          const int arl=(ar.red()*3+ar.green()*6+ar.blue())/10;
+                          const int adl=(ad.red()*3+ad.green()*6+ad.blue())/10;
+                          const int bl=(b.red()*3+b.green()*6+b.blue())/10;
+                          const int brl=(br.red()*3+br.green()*6+br.blue())/10;
+                          const int bdl=(bd.red()*3+bd.green()*6+bd.blue())/10;
+                          const int baseEdge=qAbs(bl-brl)+qAbs(bl-bdl);
+                          if(baseEdge<65)continue;
+                          ++expected;
+                          const int observedEdge=qAbs(al-arl)+qAbs(al-adl);
+                          if(observedEdge>=50 && qAbs(observedEdge-baseEdge)<135)++matched;
                       }
-                  if(total<25 || same*100<total*70)return false;
+                  const int pct=expected?100*matched/expected:0;
+                  diagnostic+=QStringLiteral("%1_edges=%2/%3(%4pct);")
+                      .arg(k==0?QStringLiteral("crosshair"):QStringLiteral("hotbar"))
+                      .arg(matched).arg(expected).arg(pct);
+                  if(expected<8 || pct<60)
+                  {ug79_v7_recovery_diag=diagnostic;return false;}
               }
+              ug79_v7_recovery_diag=diagnostic;
               return true;
           }
 
@@ -1835,13 +1854,13 @@ jobs:
               ug79_v7_stage=0;
               ug79_v7_recovering=false;
               if(ug79_batch_active)
-                  Ug79BatchStop(QStringLiteral("V7.2 automatic test halted: ")+reason);
+                  Ug79BatchStop(QStringLiteral("V7.3 automatic test halted: ")+reason);
               if(ug79_v7_status)
                   ug79_v7_status->setText(QStringLiteral("AUTO TEST ENDED: ")+reason+
-                      QStringLiteral(". Results: KBPROBE-*.log.v7-2-results.csv"));
+                      QStringLiteral(". Results: KBPROBE-*.log.v7-3-results.csv"));
               if(ug79_v5_profile_selector)
                   ug79_v5_profile_selector->setEnabled(true);
-              Ug79V4Log("V7_2_FINISHED");
+              Ug79V4Log("V7_3_FINISHED");
           }
 
           // Generate coarse grid, adaptive 1ms local sweeps and repeated confirmation.
@@ -1902,7 +1921,7 @@ jobs:
                   Ug79V7Halt(QStringLiteral("scan complete; no eligible confirmation candidates"));
                   return;
               }
-              Ug79V4Log("V7_2_SCAN_STAGE_START");
+              Ug79V4Log("V7_3_SCAN_STAGE_START");
               QTimer::singleShot(450,this,[this](){if(ug79_v7_running)Ug79V7Trial();});
           }
 
@@ -1933,8 +1952,11 @@ jobs:
               }
               if(ug79_v7_recovery_attempts>=3)
               {
+                  const QString path=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG");
+                  if(!path.isEmpty())Ug79V7Capture().save(path+QStringLiteral(".v7-3-recovery-last.png"),"PNG");
                   Ug79V7Report(QStringLiteral("UNSAFE_STOP"),
-                      QStringLiteral("three recovery checks failed; remaining tests must not be blindly sent"));
+                      QStringLiteral("three recovery checks failed: ")+ug79_v7_recovery_diag+
+                      QStringLiteral("; remaining tests not sent"));
                   Ug79V7Halt(QStringLiteral("gameplay state could not be safely recovered"));
                   return;
               }
@@ -1952,10 +1974,12 @@ jobs:
                   if(connected)SendFeedbackState();
                   QTimer::singleShot(1100,this,[this]() {
                       if(!ug79_v7_running || !ug79_v7_recovering)return;
-                      if(Ug79V7LooksLikeGameplay())
+                      const bool gameplay=Ug79V7LooksLikeGameplay();
+                      Ug79V4Log("V7_3_RECOVERY_HUD_CHECK "+ug79_v7_recovery_diag);
+                      if(gameplay)
                       {
                           ug79_v7_recovery_fail_streak=0;
-                          Ug79V4Log("V7_2_RECOVERY_GAMEPLAY_CONFIRMED");
+                          Ug79V4Log("V7_3_RECOVERY_GAMEPLAY_CONFIRMED");
                           ug79_v7_recovering=false;
                           if(ug79_v7_stage!=4)
                               QTimer::singleShot(650,this,[this](){if(ug79_v7_running)Ug79V7Control(1);});
@@ -1963,7 +1987,7 @@ jobs:
                       }
                       else
                       {
-                          Ug79V4Log("V7_2_RECOVERY_NOT_CONFIRMED");
+                          Ug79V4Log("V7_3_RECOVERY_NOT_CONFIRMED");
                           QTimer::singleShot(800,this,[this](){Ug79V7Recover();});
                       }
                   });
@@ -1976,7 +2000,7 @@ jobs:
               if(ug79_v7_stage!=4)
               {
                   ++ug79_v7_calibration_retries;
-                  Ug79V4Log("V7_2_CALIBRATION_PROTOCOL_FAILED");
+                  Ug79V4Log("V7_3_CALIBRATION_PROTOCOL_FAILED");
                   if(ug79_v7_calibration_retries>3)
                   {
                       Ug79V7Halt(QStringLiteral("calibration failed repeatedly: ")+reason);
@@ -1987,12 +2011,12 @@ jobs:
                   return;
               }
               Ug79V7Report(QStringLiteral("PROTOCOL_FAIL"),reason);
-              Ug79V4Log("V7_2_TRIAL_FAILED_CONTINUING");
+              Ug79V4Log("V7_3_TRIAL_FAILED_CONTINUING");
               ug79_v7_recovering=true;
               ++ug79_v7_recovery_fail_streak;
               // Save diagnostic evidence once per failure, not every normal frame.
               const QString path=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG");
-              if(!path.isEmpty())Ug79V7Capture().save(path+QStringLiteral(".v7-2-failure.png"),"PNG");
+              if(!path.isEmpty())Ug79V7Capture().save(path+QStringLiteral(".v7-3-failure.png"),"PNG");
               if(ug79_v7_status)
                   ug79_v7_status->setText(QStringLiteral("Recorded failure at %1/%2 ms; recovering for next profile")
                       .arg(ug79_v5_reopen_delay_ms).arg(ug79_v5_right_cross_delay_ms));
@@ -2020,6 +2044,7 @@ jobs:
               }
               ug79_v7_baseline=frame;
               ug79_v7_green_template=QImage();
+              ug79_v7_cyan_template=QImage();
               ug79_v7_red_template=QImage();
               ug79_v7_running=true;
               ug79_v7_stage=0;
@@ -2048,8 +2073,9 @@ jobs:
                   return;
               }
               ug79_v7_stage=stage;
-              const QString title=stage==2 ? QStringLiteral("/title @s title \u00a7aPASS")
-                                           : QStringLiteral("/title @s title \u00a7cFAIL");
+              const QString title=stage==2 ? QStringLiteral("/title @s title \u00a7aPASS") :
+                  (stage==5 ? QStringLiteral("/title @s title \u00a7bPASS")
+                            : QStringLiteral("/title @s title \u00a7cFAIL"));
               ug79_batch_commands=QStringList{QStringLiteral("/title @s clear"),
                                               QStringLiteral("/title @s times 0 100 0"),title};
               for(const QString &cmd:ug79_batch_commands)
@@ -2065,7 +2091,7 @@ jobs:
               ug79_batch_active=true;
               ug79_v4_clock.start();
               if(ug79_v7_status)
-                  ug79_v7_status->setText(QStringLiteral("Calibrating title control %1 of 3...").arg(stage));
+                  ug79_v7_status->setText(QStringLiteral("Calibrating red / green / red / cyan control %1...").arg(stage));
               Ug79V4Log("V7_CALIBRATION_CONTROL");
               Ug79BatchSetPhase(5,0);
               Ug79BatchReopen();
@@ -2093,10 +2119,17 @@ jobs:
               }
               else if(ug79_v7_stage==3)
               {
-                  if(!Ug79V7Match(current,false) || Ug79V7Match(current,true))
+                  if(!Ug79V7Match(current,0) || Ug79V7Match(current,1))
                   { Ug79V7Halt(QStringLiteral("negative control failed"));return; }
+                  QTimer::singleShot(350,this,[this](){if(ug79_v7_running)Ug79V7Control(5);});
+              }
+              else if(ug79_v7_stage==5)
+              {
+                  if(!Ug79V7Learn(current,2) || !Ug79V7Match(current,2) ||
+                     Ug79V7Match(current,1) || Ug79V7Match(current,0))
+                  { Ug79V7Halt(QStringLiteral("CYAN control not readable or ambiguous"));return; }
                   ug79_v7_stage=4;
-                  Ug79V4Log("V7_CALIBRATION_BOTH_CONTROLS_PASSED");
+                  Ug79V4Log("V7_3_THREE_COLOUR_CALIBRATION_PASSED");
                   Ug79V7BuildPlan(0);
               }
               else Ug79V7Halt(QStringLiteral("internal calibration stage invalid"));
@@ -2123,8 +2156,11 @@ jobs:
                   for(int x=2;x<=9;++x)
                       commands << QStringLiteral("/setblock ~%1 ~-2 ~%2 %3").arg(x).arg(z).arg(block);
               commands << QStringLiteral("/title @s title \u00a7cFAIL");
+              // Two independently calibrated colour challenges. Not full numeric OCR.
+              ug79_v7_expect_cyan=((ug79_v7_cursor+ug79_v7_mode*101)%2)==1;
               commands << QStringLiteral(
-                  "/execute if blocks ~2 ~-3 ~2 ~9 ~-3 ~5 ~2 ~-2 ~2 all run title @s title \u00a7aPASS");
+                  "/execute if blocks ~2 ~-3 ~2 ~9 ~-3 ~5 ~2 ~-2 ~2 all run title @s title \u00a7")
+                  + (ug79_v7_expect_cyan?QStringLiteral("bPASS"):QStringLiteral("aPASS"));
               if(commands.size()!=37)
               { Ug79V7Halt(QStringLiteral("generator error: unexpected command count"));return; }
               for(const QString &cmd:commands)
@@ -2132,7 +2168,7 @@ jobs:
                   { Ug79V7Halt(QStringLiteral("generated command >80 UTF-8 bytes"));return; }
               ug79_v5_reopen_delay_ms=p.first;
               ug79_v5_right_cross_delay_ms=p.second;
-              ug79_v5_profile_name=QStringLiteral("V7_2_stage%1_%2_%3_trial%4")
+              ug79_v5_profile_name=QStringLiteral("V7_3_stage%1_%2_%3_trial%4")
                   .arg(ug79_v7_mode).arg(p.first).arg(p.second).arg(ug79_v7_cursor+1);
               if(ug79_v5_profile_selector)ug79_v5_profile_selector->setEnabled(false);
               ug79_v7_green=ug79_v7_red=ug79_v7_uncertain=0;
@@ -2145,7 +2181,7 @@ jobs:
                   ug79_v7_status->setText(QStringLiteral("Stage %1, %2/%3: %4/%5 ms; %6 PASS candidates")
                       .arg(ug79_v7_mode).arg(ug79_v7_cursor+1).arg(ug79_v7_plan.size())
                       .arg(p.first).arg(p.second).arg(ug79_v7_good_pairs.size()));
-              Ug79V4Log("V7_2_TRIAL_STARTED");
+              Ug79V4Log("V7_3_TRIAL_STARTED");
               Ug79BatchSetPhase(5,0);
               Ug79BatchReopen();
           }
@@ -2160,15 +2196,19 @@ jobs:
                   Ug79V7Halt(QStringLiteral("video unavailable; cannot safely score remaining trials"));
                   return;
               }
-              const bool pass=Ug79V7Match(current,true);
-              const bool fail=Ug79V7Match(current,false);
-              if(fail || !pass)
+              const bool pass=Ug79V7Match(current,ug79_v7_expect_cyan?2:1);
+              const bool wrong=Ug79V7Match(current,ug79_v7_expect_cyan?1:2);
+              const bool fail=Ug79V7Match(current,0);
+              if(fail || wrong || !pass)
               {
                   const QString path=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG");
-                  if(!path.isEmpty())current.save(path+QStringLiteral(".v7-2-failure.png"),"PNG");
-                  Ug79V7Report(fail?QStringLiteral("GAME_FAIL"):QStringLiteral("VISUAL_INCONCLUSIVE"),
-                      fail?QStringLiteral("Minecraft FAIL glyph"):QStringLiteral("PASS glyph not verified"));
-                  Ug79V4Log("V7_2_GAME_FAILED_CONTINUING");
+                  if(!path.isEmpty())current.save(path+QStringLiteral(".v7-3-failure.png"),"PNG");
+                  Ug79V7Report(fail?QStringLiteral("GAME_FAIL"):
+                      (wrong?QStringLiteral("RECEIPT_MISMATCH"):QStringLiteral("VISUAL_INCONCLUSIVE")),
+                      fail?QStringLiteral("Minecraft FAIL glyph"):
+                      (wrong?QStringLiteral("wrong receipt colour; possible stale PASS"):
+                             QStringLiteral("expected receipt not verified")));
+                  Ug79V4Log("V7_3_GAME_FAILED_CONTINUING");
                   // A recognized game FAIL can advance; unknown images need safe recovery.
                   if(fail)Ug79V7Next();
                   else
@@ -2184,8 +2224,10 @@ jobs:
                   QTimer::singleShot(220,this,[this](){if(ug79_v7_running)Ug79V7Observe();});
                   return;
               }
-              Ug79V7Report(QStringLiteral("PASS"),QStringLiteral("three title samples and full keyboard protocol"));
-              Ug79V4Log("V7_2_GAME_VERIFIED_PASS");
+              Ug79V7Report(QStringLiteral("PASS"),ug79_v7_expect_cyan?
+                  QStringLiteral("three CYAN receipt samples and full keyboard protocol"):
+                  QStringLiteral("three GREEN receipt samples and full keyboard protocol"));
+              Ug79V4Log("V7_3_GAME_VERIFIED_PASS");
               Ug79V7Next();
           }
 
@@ -2203,7 +2245,7 @@ jobs:
                   if(reason.startsWith(QStringLiteral("Queue complete:")))
                       QTimer::singleShot(850,this,[this]() {
                           if(!ug79_v7_running)return;
-                          if(ug79_v7_stage>=1 && ug79_v7_stage<=3)
+                          if((ug79_v7_stage>=1 && ug79_v7_stage<=3) || ug79_v7_stage==5)
                               Ug79V7ControlObserve();
                           else if(ug79_v7_stage==4)
                               Ug79V7Observe();
@@ -2226,7 +2268,7 @@ jobs:
                       "Coarse 2D timing scan, then 1 ms searches around best measured successes. "),dialog);
                   autoInfo->setWordWrap(true);
                   layout->addWidget(autoInfo);
-                  auto *v7start = new QPushButton(QStringLiteral("START v7.2 FULL AUTO TEST (coarse + 1 ms + confirm)"),dialog);
+                  auto *v7start = new QPushButton(QStringLiteral("START v7.3 FULL AUTO TEST (coarse + 1 ms + confirm)"),dialog);
                   auto *v7stop = new QPushButton(QStringLiteral("STOP v7"),dialog);
                   layout->addWidget(v7start);
                   layout->addWidget(v7stop);
@@ -2245,17 +2287,17 @@ jobs:
               }
               ug79KbV2Log("KB_V4_FULLCYCLE_PANEL_SHOWN");''',
               'dedicated one-click autoplay dashboard')
-          # Use precise Qt timers only when v7.2 auto verification is opted in.
+          # Use precise Qt timers only when v7.3 auto verification is opted in.
           # Log already records actual RIGHT/CROSS events for measured jitter.
           for old in ('QTimer::singleShot(ug79_v5_reopen_delay_ms, this,',
                       'QTimer::singleShot(ug79_v5_right_cross_delay_ms, this,'):
               new=old.replace(', this,',
                   ', (qEnvironmentVariable("CHIAKI_KB_AUTO_VERIFY")==QStringLiteral("1") ? '
                   'Qt::PreciseTimer : Qt::CoarseTimer), this,')
-              cpp=replace_once(cpp,old,new,'V7.2 precise Qt timer for auto mode')
+              cpp=replace_once(cpp,old,new,'V7.3 precise Qt timer for auto mode')
           hppp.write_text(hpp,encoding='utf-8')
           cppp.write_text(cpp,encoding='utf-8')
-          print('V7.2 resilient 1 ms verifier patch complete. Opt-in ONLY.')
+          print('V7.3 resilient 1 ms verifier patch complete. Opt-in ONLY.')
           PY
 
       - name: Build libplacebo
@@ -2309,7 +2351,7 @@ jobs:
               'TEST-Full-Cycle-v4.cmd': ('both', 'KBPROBE-FullCycle-v4.log'),
               'TEST-MultiSpeed-v5.cmd': ('both', 'KBPROBE-MultiSpeed-v5.log'),
               'TEST-Bedrock-SpeedBuild-v6.cmd': ('both', 'KBPROBE-Bedrock-SpeedBuild-v6.log'),
-              'TEST-Bedrock-AutoVerify-v7-2.cmd': ('both', 'KBPROBE-Bedrock-AutoVerify-v7-2.log'),
+              'TEST-Bedrock-AutoVerify-v7-3.cmd': ('both', 'KBPROBE-Bedrock-AutoVerify-v7-3.log'),
           }
           for filename, (mode, logfile) in launchers.items():
               commands = [
@@ -2318,11 +2360,11 @@ jobs:
                   'set "VK_LOADER_DRIVERS_DISABLE=*dzn*"',
                   f'set "CHIAKI_KB_PROBE={mode}"',
                   f'set "CHIAKI_KB_DIAG_LOG=%~dp0{logfile}"',
-                  'set "CHIAKI_KB_BATCH=1"' if filename in ('TEST-Native-Batch-v3.cmd', 'TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd', 'TEST-Bedrock-AutoVerify-v7-2.cmd') else 'set "CHIAKI_KB_BATCH=0"',
-                  'set "CHIAKI_KB_FULLCYCLE=1"' if filename in ('TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd', 'TEST-Bedrock-AutoVerify-v7-2.cmd') else 'set "CHIAKI_KB_FULLCYCLE=0"',
-                  'set "CHIAKI_KB_SPEED_PROFILES=1"' if filename in ('TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd', 'TEST-Bedrock-AutoVerify-v7-2.cmd') else 'set "CHIAKI_KB_SPEED_PROFILES=0"',
+                  'set "CHIAKI_KB_BATCH=1"' if filename in ('TEST-Native-Batch-v3.cmd', 'TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd', 'TEST-Bedrock-AutoVerify-v7-3.cmd') else 'set "CHIAKI_KB_BATCH=0"',
+                  'set "CHIAKI_KB_FULLCYCLE=1"' if filename in ('TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd', 'TEST-Bedrock-AutoVerify-v7-3.cmd') else 'set "CHIAKI_KB_FULLCYCLE=0"',
+                  'set "CHIAKI_KB_SPEED_PROFILES=1"' if filename in ('TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd', 'TEST-Bedrock-AutoVerify-v7-3.cmd') else 'set "CHIAKI_KB_SPEED_PROFILES=0"',
                   'set "CHIAKI_KB_BUILD_TEST=1"' if filename == 'TEST-Bedrock-SpeedBuild-v6.cmd' else 'set "CHIAKI_KB_BUILD_TEST=0"',
-                  'set "CHIAKI_KB_AUTO_VERIFY=1"' if filename == 'TEST-Bedrock-AutoVerify-v7-2.cmd' else 'set "CHIAKI_KB_AUTO_VERIFY=0"',
+                  'set "CHIAKI_KB_AUTO_VERIFY=1"' if filename == 'TEST-Bedrock-AutoVerify-v7-3.cmd' else 'set "CHIAKI_KB_AUTO_VERIFY=0"',
                   'start "" "%~dp0chiaki.exe"',
               ]
               (folder / filename).write_bytes(('\r\n'.join(commands) + '\r\n').encode('utf-8'))
@@ -2364,21 +2406,21 @@ jobs:
           print('PSN keyboard experiment launchers generated.')
           PY
 
-      - name: Add V7.2 unattended test instructions
+      - name: Add V7.3 unattended test instructions
         run: |
           python - <<'PY'
           from pathlib import Path
-          Path('chiaki-ng-Win/README-V7-2-AUTO-TEST.txt').write_text("CHIAKI V7.2 - RESILIENT BEDROCK AUTO SPEED VERIFIER (EXPERIMENTAL)\n\nDO NOT USE ON AN IMPORTANT WORLD. Creative + cheats, disposable backed-up test world.\nNo video, tokens, telemetry or screenshots are uploaded by the verifier.\nThe existing working v6 remains unchanged on its preserved branch.\n\n1. Extract the new artifact into its own directory and close other Chiaki apps.\n2. Run TEST-Bedrock-AutoVerify-v7-2.cmd and connect to PS4 Remote Play.\n3. Open Minecraft Bedrock in Creative and stand still on/near clear ground.\n4. Ensure X +2..+9, Z +2..+5, Y -3 and -2 relative to player are disposable.\n   Coordinates are WORLD axes, not camera direction. Camera must not move.\n5. Keep Chiaki stream visible and unobscured at >=640x360. Place the test\n   panel off to one side, without obscuring the Minecraft video.\n6. Close the game chat/PS keyboard before clicking START v7.2 FULL AUTO TEST.\n7. STOP is always available. Do not leave first live trial unattended.\n\nHow the test works: first calibrates actual red/green/red title images;\nthen tests an 8x11 grid of reopen/cross timings starting at P2 400/620ms.\nEach trial rebuilds 32 blocks and verifies Bedrock /execute if blocks.\nFailure is logged and, for protocol failures, up to 3 bounded Circle-cancel\nrecovery attempts require the video to resemble the initial gameplay.\nOnly recovered known gameplay permits the next trial; no failed command is\nblindly resent. An unrecoverable state stops the engine safely; remaining\nuntested settings are not presented as passes.\n\nFollowing the coarse scan, two 31-point searches around the fastest\nobserved success vary one parameter in 1ms increments at a time.\nFinally the 3 fastest distinct successes are repeated (24/12/12 trials).\nONE successful test is never evidence of absolute reliability; even dozens\nof successful trials cannot prove a 100% error-free rate.\nActual elapsed times and event timestamps matter more than QTimer's requested\nmillisecond delay (Windows scheduler/network jitter may blur 1ms changes).\n\nResults: KBPROBE-Bedrock-AutoVerify-v7-2.log and append-only\nKBPROBE-Bedrock-AutoVerify-v7-2.log.v7-2-results.csv\nCSV outcomes: PASS, GAME_FAIL, PROTOCOL_FAIL, VISUAL_INCONCLUSIVE,\nVISUAL_FAIL and UNSAFE_STOP. ALL FAILURES STAY IN THE RECORD.\nWhen game/video state is uncertain, tests stop rather than making unsafe\ncommands. On-screen red Minecraft syntax errors are not yet parsed; game-side\nverification is based on verified glyphs from the /execute comparator.\n\nLIMITATIONS: THIS IS NOT YET COMPILED OR PS4-VALIDATED. GitHub build required.\nProof of full-world command execution is not claimed. Test only in disposable\nworld. Do not leave the first test unsupervised until recovery is validated.\n",encoding='utf-8')
+          Path('chiaki-ng-Win/README-V7-3-AUTO-TEST.txt').write_text("CHIAKI V7.3 - RESILIENT BEDROCK AUTO SPEED VERIFIER (EXPERIMENTAL)\n\nDO NOT USE ON AN IMPORTANT WORLD. Creative + cheats, disposable backed-up test world.\nNo video, tokens, telemetry or screenshots are uploaded by the verifier.\nThe existing working v6 remains unchanged on its preserved branch.\n\n1. Extract the new artifact into its own directory and close other Chiaki apps.\n2. Run TEST-Bedrock-AutoVerify-v7-3.cmd and connect to PS4 Remote Play.\n3. Open Minecraft Bedrock in Creative and stand still on/near clear ground.\n4. Ensure X +2..+9, Z +2..+5, Y -3 and -2 relative to player are disposable.\n   Coordinates are WORLD axes, not camera direction. Camera must not move.\n5. Keep Chiaki stream visible and unobscured at >=640x360. Place the test\n   panel off to one side, without obscuring the Minecraft video.\n6. Close the game chat/PS keyboard before clicking START v7.3 FULL AUTO TEST.\n7. STOP is always available. Do not leave first live trial unattended.\n\nHow the test works: first calibrates actual red/green/red title images;\nthen tests an 8x11 grid of reopen/cross timings starting at P2 400/620ms.\nEach trial rebuilds 32 blocks and verifies Bedrock /execute if blocks.\nFailure is logged and, for protocol failures, up to 3 bounded Circle-cancel\nrecovery attempts require the video to resemble the initial gameplay.\nOnly recovered known gameplay permits the next trial; no failed command is\nblindly resent. An unrecoverable state stops the engine safely; remaining\nuntested settings are not presented as passes.\n\nFollowing the coarse scan, two 31-point searches around the fastest\nobserved success vary one parameter in 1ms increments at a time.\nFinally the 3 fastest distinct successes are repeated (24/12/12 trials).\nONE successful test is never evidence of absolute reliability; even dozens\nof successful trials cannot prove a 100% error-free rate.\nActual elapsed times and event timestamps matter more than QTimer's requested\nmillisecond delay (Windows scheduler/network jitter may blur 1ms changes).\n\nResults: KBPROBE-Bedrock-AutoVerify-v7-3.log and append-only\nKBPROBE-Bedrock-AutoVerify-v7-3.log.v7-3-results.csv\nCSV outcomes: PASS, GAME_FAIL, PROTOCOL_FAIL, VISUAL_INCONCLUSIVE,\nVISUAL_FAIL and UNSAFE_STOP. ALL FAILURES STAY IN THE RECORD.\nV7.3 alternates verified GREEN and CYAN receipts (not unique number OCR).\nRecovery verifies crosshair/hotbar edges and logs exact mismatch reasons.\nWhen game/video state is uncertain, tests stop rather than making unsafe\ncommands. On-screen red Minecraft syntax errors are not yet parsed; game-side\nverification is based on verified glyphs from the /execute comparator.\n\nLIMITATIONS: THIS IS NOT YET COMPILED OR PS4-VALIDATED. GitHub build required.\nProof of full-world command execution is not claimed. Test only in disposable\nworld. Do not leave the first test unsupervised until recovery is validated.\n",encoding='utf-8')
           PY
 
       - name: Package portable prototype
         run: |
-          zip -r chiaki-ng-bedrock-auto-verify-v7-2-win64.zip chiaki-ng-Win
+          zip -r chiaki-ng-bedrock-auto-verify-v7-3-win64.zip chiaki-ng-Win
 
       - name: Upload portable prototype
         uses: actions/upload-artifact@v4
         with:
-          name: chiaki-ng-bedrock-auto-verify-v7-2-win64
-          path: chiaki-ng-bedrock-auto-verify-v7-2-win64.zip
+          name: chiaki-ng-bedrock-auto-verify-v7-3-win64
+          path: chiaki-ng-bedrock-auto-verify-v7-3-win64.zip
           if-no-files-found: error
           retention-days: 7
