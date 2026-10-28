@@ -1,4 +1,4 @@
-name: Build Chiaki-ng Windows - Bedrock Speed-Build v6
+name: Build Chiaki-ng Windows - Automated Bedrock Speed Verifier v7
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-windows_x64-msys2:
-    name: Build Windows x64 Bedrock Speed-Build v6
+    name: Build Windows x64 Bedrock Visual Verifier v7
     runs-on: windows-latest
     defaults:
       run:
@@ -1596,6 +1596,91 @@ jobs:
           print('V6 completed: Opt-in building whitelist, P0-P3 only, older launchers preserved.')
           PY
 
+      - name: Inject opt-in v7 automatic Bedrock visual verifier (temporary checkout)
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          hppp=Path('gui/include/streamsession.h')
+          cppp=Path('gui/src/streamsession.cpp')
+          hpp=hppp.read_text(encoding='utf-8')
+          cpp=cppp.read_text(encoding='utf-8')
+          def replace_once(s,old,new,name):
+              n=s.count(old)
+              if n!=1: raise RuntimeError('V7 '+name+': expected unique anchor, found '+str(n))
+              print('V7 unique anchor confirmed:',name)
+              return s.replace(old,new,1)
+
+          hpp=replace_once(hpp,'QPointer<QComboBox> ug79_v5_profile_selector;',
+              '''QPointer<QComboBox> ug79_v5_profile_selector;
+              bool ug79_v7_running = false;
+              int ug79_v7_profile = 0;
+              int ug79_v7_repeat = 0;
+              int ug79_v7_green = 0;
+              int ug79_v7_red = 0;
+              int ug79_v7_uncertain = 0;
+              QImage ug79_v7_baseline;
+              QPointer<QLabel> ug79_v7_status;
+              QImage Ug79V7Capture() const;
+              void Ug79V7Start();
+              void Ug79V7Trial();
+              void Ug79V7Observe();
+              void Ug79V7Halt(const QString &reason);''','opt-in state and methods')
+          cpp=replace_once(cpp,'#include <QPlainTextEdit>',
+              '#include <QPlainTextEdit>\n#include <QGuiApplication>\n#include <QScreen>\n#include <QWindow>\n#include <QPixmap>\n#include <QColor>',
+              'screen capture includes')
+          cpp=replace_once(cpp,'void StreamSession::Ug79BatchStop(const QString &reason)',
+              '// V7 opt-in experiment: game-side /execute comparison + visual title feedback.\n// No network data, screenshots, or commands are sent outside this local machine.\nQImage StreamSession::Ug79V7Capture() const\n{\n    QWindow *best = nullptr;\n    qint64 bestArea = 0;\n    // Select the large Chiaki stream window; never use the small test control dialog.\n    for(QWindow *w : QGuiApplication::allWindows())\n    {\n        if(!w || !w->isVisible() || !w->screen() || w->width() < 640 || w->height() < 360)\n            continue;\n        const QString title = w->title().toLower();\n        if(title.contains(QStringLiteral("test")) || title.contains(QStringLiteral("speed")))\n            continue;\n        const qint64 area = qint64(w->width()) * w->height();\n        if(area > bestArea)\n        {\n            bestArea = area;\n            best = w;\n        }\n    }\n    if(!best)\n        return QImage();\n    const QPixmap px = best->screen()->grabWindow(best->winId());\n    return px.isNull() ? QImage() : px.toImage().convertToFormat(QImage::Format_RGB32);\n}\n\nvoid StreamSession::Ug79V7Halt(const QString &reason)\n{\n    if(!ug79_v7_running)\n        return;\n    ug79_v7_running = false; // First: prevents nested stop from starting another run.\n    if(ug79_batch_active)\n        Ug79BatchStop(QStringLiteral("V7 automatic test halted: ") + reason);\n    if(ug79_v7_status)\n        ug79_v7_status->setText(QStringLiteral("AUTO TEST STOPPED: ") + reason);\n    if(ug79_v5_profile_selector)\n        ug79_v5_profile_selector->setEnabled(true);\n    Ug79V4Log("V7_HALTED");\n}\n\nvoid StreamSession::Ug79V7Start()\n{\n    if(qEnvironmentVariable("CHIAKI_KB_AUTO_VERIFY") != QStringLiteral("1") ||\n       !connected || ug79_batch_active || ug79_batch_keyboard_open || ug79_v7_running)\n        return;\n    const QImage frame = Ug79V7Capture();\n    if(frame.width() < 640 || frame.height() < 360)\n    {\n        if(ug79_v7_status)\n            ug79_v7_status->setText(QStringLiteral(\n                "No readable stream window. Keep Minecraft gameplay visible on screen; nothing was sent."));\n        return;\n    }\n    // A black/flat frame cannot be used as visual evidence.\n    const QColor a(frame.pixel(frame.width()/4,frame.height()/4));\n    const QColor b(frame.pixel(frame.width()/2,frame.height()/2));\n    const QColor c(frame.pixel(frame.width()*3/4,frame.height()*3/4));\n    if(a == b && b == c)\n    {\n        if(ug79_v7_status)\n            ug79_v7_status->setText(QStringLiteral("The stream capture appears blank; nothing was sent."));\n        return;\n    }\n    ug79_v7_baseline = frame;\n    ug79_v7_running = true;\n    ug79_v7_profile = 0;\n    ug79_v7_repeat = 0;\n    ug79_v7_green = 0;\n    ug79_v7_red = 0;\n    ug79_v7_uncertain = 0;\n    if(ug79_v7_status)\n        ug79_v7_status->setText(QStringLiteral("Autotune armed: 32 blocks/trial, 3 trials/timing. Baseline P2 first."));\n    Ug79V4Log("V7_AUTOTUNE_STARTED");\n    QTimer::singleShot(400,this,[this]() { if(ug79_v7_running) Ug79V7Trial(); });\n}\n\nvoid StreamSession::Ug79V7Trial()\n{\n    if(!ug79_v7_running || !connected || ug79_batch_active || ug79_batch_keyboard_open)\n    {\n        Ug79V7Halt(QStringLiteral("connection, keyboard, or batch state is not ready"));\n        return;\n    }\n    static const int pause_ms[] = {620, 590, 560, 530, 500, 470, 440, 410, 400};\n    static const QString palette[] = {\n        QStringLiteral("lime_concrete"), QStringLiteral("blue_concrete"),\n        QStringLiteral("yellow_concrete"), QStringLiteral("pink_concrete")};\n    if(ug79_v7_profile >= 9)\n    {\n        Ug79V7Halt(QStringLiteral("all nine timings passed; review log before using any speed for construction"));\n        return;\n    }\n    const int pause = pause_ms[ug79_v7_profile];\n    const QString block = palette[(ug79_v7_profile*3 + ug79_v7_repeat) % 4];\n    QStringList commands;\n    commands << QStringLiteral("/title @s clear");\n    commands << QStringLiteral("/fill ~2 ~-3 ~2 ~9 ~-3 ~5 ") + block;\n    commands << QStringLiteral("/fill ~2 ~-2 ~2 ~9 ~-2 ~5 air");\n    for(int z=2;z<=5;++z)\n        for(int x=2;x<=9;++x)\n            commands << QStringLiteral("/setblock ~%1 ~-2 ~%2 %3").arg(x).arg(z).arg(block);\n    // Fail-first, then override with green only if ALL 32 blocks match.\n    // The section sign is two UTF-8 bytes. Do not increase the established 80-byte limit.\n    commands << QStringLiteral("/title @s title \\u00a7cFAIL");\n    commands << QStringLiteral(\n        "/execute if blocks ~2 ~-3 ~2 ~9 ~-3 ~5 ~2 ~-2 ~2 all run title @s title \\u00a7aPASS");\n    if(commands.size()!=37)\n    {\n        Ug79V7Halt(QStringLiteral("internal generator produced an unexpected batch size"));\n        return;\n    }\n    for(const QString &command: commands)\n        if(command.toUtf8().size() > 80)\n        {\n            Ug79V7Halt(QStringLiteral("a generated command exceeded 80 UTF-8 bytes"));\n            return;\n        }\n    ug79_v5_reopen_delay_ms = 400;\n    ug79_v5_right_cross_delay_ms = pause;\n    ug79_v5_profile_name = QStringLiteral("V7_AUTO_400_%1_trial_%2")\n        .arg(pause).arg(ug79_v7_repeat+1);\n    if(ug79_v5_profile_selector)\n        ug79_v5_profile_selector->setEnabled(false);\n    ug79_v7_green = ug79_v7_red = ug79_v7_uncertain = 0;\n    ug79_batch_commands = commands;\n    ug79_batch_index = 0;\n    ug79_batch_active = true;\n    ug79_v4_clock.start();\n    if(ug79_v7_status)\n        ug79_v7_status->setText(QStringLiteral("Testing 400/%1 ms, trial %2 of 3 (37 commands)...")\n            .arg(pause).arg(ug79_v7_repeat+1));\n    Ug79V4Log("V7_TRIAL_STARTED");\n    Ug79BatchSetPhase(5,0);\n    Ug79BatchReopen();\n}\n\nvoid StreamSession::Ug79V7Observe()\n{\n    if(!ug79_v7_running || !connected || ug79_batch_active)\n        return;\n    const QImage current = Ug79V7Capture();\n    if(current.isNull() || current.size()!=ug79_v7_baseline.size())\n    {\n        Ug79V7Halt(QStringLiteral("stream window vanished or changed size during verification"));\n        return;\n    }\n    // Compare with the initial Minecraft gameplay frame. The coloured result title\n    // should be visible in the central screen area. Treat uncertainty as a failure.\n    int green=0,red=0;\n    for(int y=current.height()*32/100; y<current.height()*65/100; y+=2)\n        for(int x=current.width()*19/100; x<current.width()*81/100; x+=2)\n        {\n            const QColor now(current.pixel(x,y));\n            const QColor old(ug79_v7_baseline.pixel(x,y));\n            if(qAbs(now.red()-old.red())+qAbs(now.green()-old.green())+\n               qAbs(now.blue()-old.blue()) < 130)\n                continue;\n            if(now.green()>160 && now.green()>now.red()*1.5 && now.green()>now.blue()*1.4)\n                ++green;\n            if(now.red()>160 && now.red()>now.green()*1.5 && now.red()>now.blue()*1.4)\n                ++red;\n        }\n    if(green>=40 && green>red*3)\n        ++ug79_v7_green;\n    else if(red>=40 && red>green*3)\n        ++ug79_v7_red;\n    else\n        ++ug79_v7_uncertain;\n    const int samples = ug79_v7_green+ug79_v7_red+ug79_v7_uncertain;\n    if(samples<3)\n    {\n        QTimer::singleShot(250,this,[this]() { if(ug79_v7_running) Ug79V7Observe(); });\n        return;\n    }\n    // Save just one small failure frame. Do not fill disks with normal screenshots.\n    if(ug79_v7_green<2)\n    {\n        const QString logPath=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG");\n        if(!logPath.isEmpty())\n            current.save(logPath+QStringLiteral(".v7-failure.png"),"PNG");\n        Ug79V4Log(ug79_v7_red>=2 ? "V7_GAME_VERIFIED_FAIL" : "V7_VISUAL_INCONCLUSIVE");\n        Ug79V7Halt(ug79_v7_red>=2\n            ? QStringLiteral("Minecraft returned a RED FAIL title; no faster settings tried")\n            : QStringLiteral("No trustworthy green/red title detected; check stream and formatting codes"));\n        return;\n    }\n    Ug79V4Log("V7_GAME_VERIFIED_PASS");\n    ++ug79_v7_repeat;\n    if(ug79_v7_repeat==3)\n    {\n        ug79_v7_repeat=0;\n        ++ug79_v7_profile;\n    }\n    if(ug79_v7_profile>=9)\n    {\n        Ug79V7Halt(QStringLiteral("27 of 27 trials passed; fastest observed 400/400 ms. "\n            "Do not treat this as proof of zero future failures."));\n        return;\n    }\n    if(ug79_v7_status)\n        ug79_v7_status->setText(QStringLiteral("Game verified PASS. Moving to next trial..."));\n    // Leave time for the old title to fade, so the next trial has a clear result.\n    QTimer::singleShot(1000,this,[this]() { if(ug79_v7_running) Ug79V7Trial(); });\n}\n\n'+'void StreamSession::Ug79BatchStop(const QString &reason)',
+              'video verifier and automatic trial state machine')
+          cpp=replace_once(cpp,
+              'if(!text.isEmpty() && text != ug79_batch_commands.at(ug79_batch_index))',
+              '''if((ug79_v7_running && text.isEmpty()) ||
+                 (!text.isEmpty() && text != ug79_batch_commands.at(ug79_batch_index)))''',
+              'reject empty keyboard acknowledgements during auto testing')
+          cpp=replace_once(cpp,'ug79KbV2Log("KB_V3_BATCH_STOPPED");',
+              '''ug79KbV2Log("KB_V3_BATCH_STOPPED");
+              if(ug79_v7_running)
+              {
+                  if(reason.startsWith(QStringLiteral("Queue complete:")))
+                      QTimer::singleShot(1300,this,[this]() { if(ug79_v7_running) Ug79V7Observe(); });
+                  else
+                      Ug79V7Halt(QStringLiteral("protocol stopped or timed out: ")+reason);
+              }''', 'advance only after complete PS4 protocol batch')
+          cpp=replace_once(cpp,'ug79KbV2Log("KB_V4_FULLCYCLE_PANEL_SHOWN");',
+              '''if(qEnvironmentVariable("CHIAKI_KB_AUTO_VERIFY") == QStringLiteral("1"))
+              {
+                  auto *autoInfo = new QLabel(QStringLiteral(
+                      "V7 UNATTENDED TEST (test world only): 32 relative-position blocks are rebuilt "
+                      "for each trial. /execute if blocks verifies them IN GAME and displays a "
+                      "GREEN PASS or RED FAIL title. Screen capture classifies the title. "
+                      "Keep Chiaki video unobscured and do not move the player or camera. "
+                      "Any protocol error or ambiguous screen halts the suite. "
+                      "Uses 400/620 ms (P2) first; lowers Right-to-Cross by 30 ms per profile."),dialog);
+                  autoInfo->setWordWrap(true);
+                  layout->addWidget(autoInfo);
+                  auto *v7start = new QPushButton(QStringLiteral("START v7 AUTOTUNE (32 blocks, disposable world)"),dialog);
+                  auto *v7stop = new QPushButton(QStringLiteral("STOP v7"),dialog);
+                  layout->addWidget(v7start);
+                  layout->addWidget(v7stop);
+                  auto *v7status = new QLabel(QStringLiteral("Idle: press START from normal Minecraft gameplay."),dialog);
+                  v7status->setWordWrap(true);
+                  layout->addWidget(v7status);
+                  ug79_v7_status = v7status;
+                  connect(v7start,&QPushButton::clicked,dialog,[this]() { Ug79V7Start(); });
+                  connect(v7stop,&QPushButton::clicked,dialog,[this]() {
+                      Ug79V7Halt(QStringLiteral("user pressed STOP"));
+                  });
+                  connect(dialog,&QObject::destroyed,this,[this]() {
+                      ug79_v7_status=nullptr;
+                      Ug79V7Halt(QStringLiteral("test panel was closed"));
+                  });
+              }
+              ug79KbV2Log("KB_V4_FULLCYCLE_PANEL_SHOWN");''',
+              'dedicated one-click autoplay dashboard')
+          hppp.write_text(hpp,encoding='utf-8')
+          cppp.write_text(cpp,encoding='utf-8')
+          print('V7 automated verifier patch complete. Opt-in ONLY.')
+          PY
+
       - name: Build libplacebo
         run: |
           scripts/build-libplacebo-windows.sh
@@ -1647,6 +1732,7 @@ jobs:
               'TEST-Full-Cycle-v4.cmd': ('both', 'KBPROBE-FullCycle-v4.log'),
               'TEST-MultiSpeed-v5.cmd': ('both', 'KBPROBE-MultiSpeed-v5.log'),
               'TEST-Bedrock-SpeedBuild-v6.cmd': ('both', 'KBPROBE-Bedrock-SpeedBuild-v6.log'),
+              'TEST-Bedrock-AutoVerify-v7.cmd': ('both', 'KBPROBE-Bedrock-AutoVerify-v7.log'),
           }
           for filename, (mode, logfile) in launchers.items():
               commands = [
@@ -1655,10 +1741,11 @@ jobs:
                   'set "VK_LOADER_DRIVERS_DISABLE=*dzn*"',
                   f'set "CHIAKI_KB_PROBE={mode}"',
                   f'set "CHIAKI_KB_DIAG_LOG=%~dp0{logfile}"',
-                  'set "CHIAKI_KB_BATCH=1"' if filename in ('TEST-Native-Batch-v3.cmd', 'TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd') else 'set "CHIAKI_KB_BATCH=0"',
-                  'set "CHIAKI_KB_FULLCYCLE=1"' if filename in ('TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd') else 'set "CHIAKI_KB_FULLCYCLE=0"',
-                  'set "CHIAKI_KB_SPEED_PROFILES=1"' if filename in ('TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd') else 'set "CHIAKI_KB_SPEED_PROFILES=0"',
+                  'set "CHIAKI_KB_BATCH=1"' if filename in ('TEST-Native-Batch-v3.cmd', 'TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd', 'TEST-Bedrock-AutoVerify-v7.cmd') else 'set "CHIAKI_KB_BATCH=0"',
+                  'set "CHIAKI_KB_FULLCYCLE=1"' if filename in ('TEST-Full-Cycle-v4.cmd', 'TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd', 'TEST-Bedrock-AutoVerify-v7.cmd') else 'set "CHIAKI_KB_FULLCYCLE=0"',
+                  'set "CHIAKI_KB_SPEED_PROFILES=1"' if filename in ('TEST-MultiSpeed-v5.cmd', 'TEST-Bedrock-SpeedBuild-v6.cmd', 'TEST-Bedrock-AutoVerify-v7.cmd') else 'set "CHIAKI_KB_SPEED_PROFILES=0"',
                   'set "CHIAKI_KB_BUILD_TEST=1"' if filename == 'TEST-Bedrock-SpeedBuild-v6.cmd' else 'set "CHIAKI_KB_BUILD_TEST=0"',
+                  'set "CHIAKI_KB_AUTO_VERIFY=1"' if filename == 'TEST-Bedrock-AutoVerify-v7.cmd' else 'set "CHIAKI_KB_AUTO_VERIFY=0"',
                   'start "" "%~dp0chiaki.exe"',
               ]
               (folder / filename).write_bytes(('\r\n'.join(commands) + '\r\n').encode('utf-8'))
@@ -1700,14 +1787,21 @@ jobs:
           print('PSN keyboard experiment launchers generated.')
           PY
 
+      - name: Add V7 unattended test instructions
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          Path('chiaki-ng-Win/README-V7-AUTO-TEST.txt').write_text("CHIAKI V7 - AUTOMATED BEDROCK INPUT SPEED TEST - EXPERIMENTAL\n\nSTATUS: Source workflow verified offline; NOT YET Windows compiled or PS4 tested.\nThe existing successful v6 GitHub branch / build stays unchanged.\n\nThis is a conservative prototype for automatic building-speed comparisons.\nIt uses Chiaki's existing PS4 native text automation plus a Bedrock-world\nverifier, and captures the rendered Chiaki stream window to read a result title.\n\nHOW TO RUN (AFTER BUILDING V7 ON AN EXPERIMENTAL BRANCH):\n1. Extract the v7 portable artifact to its OWN folder; leave v6 untouched.\n2. Create a DISPOSABLE/backup Minecraft Bedrock Creative world with cheats ON.\n3. Stand STILL in gameplay in a suitably empty area with room for the test.\n   The test WILL change 64 block positions relative to your feet:\n   X=+2..+9, Z=+2..+5, Y=-3 and Y=-2. Stand safely and avoid moving.\n4. Start TEST-Bedrock-AutoVerify-v7.cmd and connect Remote Play.\n5. Keep the Minecraft video window visible (at least 640x360), with no\n   overlapping dialogs or notifications in the centre. Place the control\n   panel off to one side, and do not resize the stream during a run.\n6. Press START v7 AUTOTUNE ONCE with the in-game chat/keyboard CLOSED.\n   Then leave the controller, keyboard and camera alone. STOP is always available.\n\nEach trial (37 commands, under the existing 40-command safety limit):\n   /title clear -> reference /fill -> target reset /fill -> 32 /setblock\n   -> RED FAIL title -> /execute if blocks ... all run GREEN PASS title.\nThe 32 positions are compared IN GAME by Bedrock's own /execute condition.\nThe game stream is inspected for the coloured title three times. Two clear\nGREEN votes are required, otherwise the suite stops. Unknown never means PASS.\n\nTiming series: first 400/620ms (known P2), then 400/590, 400/560,\n400/530, 400/500, 400/470, 400/440, 400/410, 400/400.\nThree trials of 32 block changes at each speed (up to 999 total commands).\nAny PS4 response timeout, text mismatch, failure, or unclear screen HALTS\nfuture trials. Never blindly continues to faster settings on errors.\n\nResults: KBPROBE-Bedrock-AutoVerify-v7.log (event timestamps and profiles).\nOne failure image may be written as KBPROBE-Bedrock-AutoVerify-v7.log.v7-failure.png.\nTreat logs and any screenshot as PRIVATE, since game/PSN details may be visible.\n\nLIMITATIONS:\n- Windows build, stream capture and game title colour recognition not yet\n  validated on your exact PC/PS4 setup. First calibration can fail closed.\n- Verification proves the resulting test pattern is correct when it reports\n  PASS; it does not independently prove every intermediate command was executed.\n- A successful short trial never guarantees 100% reliability for future builds.\n- The test changes world blocks. No automatic cleanup; use a disposable world.\n- This initial experiment tunes only Right-to-Cross time with 400ms reopen.\n  It is not yet a complete 2D search of all timing variables.\n- No screenshot is uploaded anywhere; only one local failure image is saved.\n\nNo source is modified in the preserved v6 branch. This v7 must be compiled\non a NEW EXPERIMENTAL branch; do not overwrite the working version.\n",encoding='utf-8')
+          PY
+
       - name: Package portable prototype
         run: |
-          zip -r chiaki-ng-bedrock-speed-build-v6-win64.zip chiaki-ng-Win
+          zip -r chiaki-ng-bedrock-auto-verify-v7-win64.zip chiaki-ng-Win
 
       - name: Upload portable prototype
         uses: actions/upload-artifact@v4
         with:
-          name: chiaki-ng-bedrock-speed-build-v6-win64
-          path: chiaki-ng-bedrock-speed-build-v6-win64.zip
+          name: chiaki-ng-bedrock-auto-verify-v7-win64
+          path: chiaki-ng-bedrock-auto-verify-v7-win64.zip
           if-no-files-found: error
           retention-days: 7
