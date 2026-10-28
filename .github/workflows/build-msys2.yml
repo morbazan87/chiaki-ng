@@ -1945,7 +1945,7 @@ jobs:
                   chiaki_session_keyboard_reject(&session);
               ++ug79_batch_stage_token; // invalidate leftover controller/timer callbacks
               chiaki_controller_state_set_idle(&ug79_automation_state);
-              ug79_automation_state.buttons=CHIAKI_CONTROLLER_BUTTON_CIRCLE;
+              ug79_automation_state.buttons=CHIAKI_CONTROLLER_BUTTON_MOON;
               SendFeedbackState();
               QTimer::singleShot(175,this,[this]() {
                   chiaki_controller_state_set_idle(&ug79_automation_state);
