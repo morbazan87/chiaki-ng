@@ -1,4 +1,4 @@
-name: Build Chiaki-ng Windows - v8.1 Screenshot Regions (Experimental)
+name: Build Chiaki-ng Windows - v8.2 Reliability Lab (Experimental)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-windows_x64-msys2:
-    name: Build Windows x64 Bedrock Visual Wall v8.1
+    name: Build Windows x64 Bedrock Reliability Lab v8.2
     runs-on: windows-latest
     defaults:
       run:
@@ -2950,6 +2950,423 @@ jobs:
           print('V8.1 keyboard recovery installed: phase-1 only, 2 retry limit per command, 12 per session; no submitted command resent.')
           PY_V81
 
+      - name: Inject opt-in v8.2 visual reliability laboratory (temporary runner checkout)
+        run: |
+          python - <<'PY_V82'
+          #!/usr/bin/env python3
+          """UMCB/Chiaki v8.2: experimental opt-in reliability laboratory.
+          Applies AFTER all v8.1 workflow C++ injection steps, to runner checkout ONLY.
+          One exact checked patch per anchor; refuse any unknown source revision.
+          """
+          from pathlib import Path
+          hpp_path = Path('gui/include/streamsession.h')
+          cpp_path = Path('gui/src/streamsession.cpp')
+          h = hpp_path.read_text(encoding='utf-8')
+          c = cpp_path.read_text(encoding='utf-8')
+          
+          def one(src, old, new, label):
+              n = src.count(old)
+              if n != 1:
+                  raise RuntimeError(f'V8.2 REFUSED {label}: expected exactly one anchor; found {n}')
+              print('V8.2 validated', label)
+              return src.replace(old, new, 1)
+          
+          h = one(h, 'bool ug79_v8_recovering=false;', '''bool ug79_v8_recovering=false;
+                        // v8.2-only settings; v8.1 behavior remains inactive when LAB!=1.
+                        struct Ug79V82Profile { int reopen=400, cross=400, rh=170, ch=170, accept=160; };
+                        bool ug79_v82_enabled=false;
+                        QVector<Ug79V82Profile> ug79_v82_plan;
+                        int ug79_v82_rh=170, ug79_v82_ch=170, ug79_v82_accept=160;
+                        int ug79_v82_attempts=0, ug79_v82_recoveries_trial=0;
+                        int ug79_v82_recoveries_profile=0;
+                        bool ug79_v82_abort_current=false;
+                        quint64 ug79_v82_token=0;
+                        QImage ug79_v82_game_ref, ug79_v82_chat_ref;
+                        QVector<QPoint> ug79_v82_mask;
+                        bool ug79_v82_learning_failed=false;
+                        void Ug79V82Start(int mode,int repeats,int reopen,int cross);
+                        void Ug79V82ChooseProfile();
+                        void Ug79V82CaptureChat();
+                        int Ug79V82Classify(const QImage &img) const;
+                        void Ug79V82RecoverOpen();
+                        void Ug79V82Observe(quint64 token,int pass,int known);
+                        void Ug79V82PulseCircle(quint64 token,int round);
+                        void Ug79V82Retry(quint64 token,bool crossOnly);
+                        void Ug79V82TrialLog(const QString &outcome,int correct,int missing,int uncertain) const;
+          ''', 'class state and methods')
+          c = one(c, '#include <QSpinBox>', '#include <QSpinBox>\n#include <QComboBox>\n#include <initializer_list>', 'Qt combobox include')
+          
+          # Strict per-state reopen timeout instead of 9.5 seconds of blind waiting.
+          c = one(c, 'Ug79BatchSetPhase(1, 9500);',
+                  'Ug79BatchSetPhase(1, ug79_v82_enabled ? 3800 : 9500);', 'reopen watchdog')
+          
+          # Different input durations are enabled ONLY during stage-5 timed trials.
+          c = one(c,
+          '''              SendFeedbackState();
+                        QTimer::singleShot(170,this,[this,stage]() {''',
+          '''              SendFeedbackState();
+                        QTimer::singleShot((ug79_v82_enabled && ug79_v8_stage==5) ? ug79_v82_rh : 170,this,[this,stage]() {''',
+          'release Right with controlled duration')
+          c = one(c,
+          '''                      ug79_automation_state.buttons = CHIAKI_CONTROLLER_BUTTON_CROSS;
+                                SendFeedbackState();
+                                QTimer::singleShot(170,this,[this,stage]() {''',
+          '''                      ug79_automation_state.buttons = CHIAKI_CONTROLLER_BUTTON_CROSS;
+                                SendFeedbackState();
+                                QTimer::singleShot((ug79_v82_enabled && ug79_v8_stage==5) ? ug79_v82_ch : 170,this,[this,stage]() {''',
+          'release Cross with controlled duration')
+          c = one(c, 'QTimer::singleShot(160, this, [this, stage]() {',
+                  'QTimer::singleShot((ug79_v82_enabled && ug79_v8_stage==5) ? ug79_v82_accept : 160, this, [this, stage]() {',
+                  'native Accept settle time')
+          
+          # Collect screen refs from the FIRST successful calibration open, before any
+          # timed trial; no extra button presses or screenshot files in steady state.
+          c = one(c,'ug79KbV2Log("KB_V3_REOPEN_CHAT_BEGIN");',
+          '''ug79KbV2Log("KB_V3_REOPEN_CHAT_BEGIN");
+                        if(ug79_v82_enabled && (ug79_v8_stage==1 || ug79_v8_stage==5) && ug79_v82_game_ref.isNull())
+                            ug79_v82_game_ref=Ug79V7Capture();''',
+          'gameplay reference before opening chat')
+          c = one(c, 'Ug79V4Log("CROSS_DOWN");',
+          '''if(ug79_v82_enabled && (ug79_v8_stage==1 || ug79_v8_stage==5) && ug79_v82_chat_ref.isNull())
+                                    Ug79V82CaptureChat();
+                                Ug79V4Log("CROSS_DOWN");''',
+          'chat reference immediately before first Cross')
+          
+          # After a successful keyboard opening, start a fresh per-command retry allowance.
+          c = one(c, 'ug79KbV2Log("KB_V3_TEXT_SEND_BEGIN");',
+                  'if(ug79_v82_enabled) ug79_v82_attempts=0;\n              ug79KbV2Log("KB_V3_TEXT_SEND_BEGIN");',
+                  'reset consecutive reopen failure counter after native open')
+          
+          # Recover before v8.1's unconditional Circle-Circle legacy path.
+          c = one(c,
+          '''              const bool reopen_timeout=ug79_v8_last_stop_phase==1 &&
+                            reason.contains(QStringLiteral("PS4 keyboard response timed out"));''',
+          '''              const bool reopen_timeout=ug79_v8_last_stop_phase==1 &&
+                            reason.contains(QStringLiteral("PS4 keyboard response timed out"));
+                        if(ug79_v82_enabled && reopen_timeout)
+                        {
+                            Ug79V82RecoverOpen();
+                            return;
+                        }''', 'opt-in classified recovery takeover')
+          
+          # Free lab session state on STOP (including user abort, disconnect, or complete).
+          c = one(c,
+          '''              ug79_v8_running=false;
+                        ug79_v8_recovering=false;''',
+          '''              ug79_v8_running=false;
+                        ug79_v82_enabled=false;
+                        ++ug79_v82_token;
+                        ug79_v8_recovering=false;''',
+          'clear lab state when v8 stops')
+          
+          # Select next profile AFTER wall was reset and checked empty.
+          c = one(c,
+          '''                      ug79_v8_stage=5;
+                                Ug79V8Send(Ug79V8WallCommands(),ug79_v8_reopen,''',
+          '''                      ug79_v8_stage=5;
+                                if(ug79_v82_enabled) Ug79V82ChooseProfile();
+                                Ug79V8Send(Ug79V8WallCommands(),ug79_v8_reopen,''',
+          'choose next profile only after clear verified')
+          
+          # Write compact per-profile statistics alongside the original 32-block CSV.
+          c = one(c,
+          '''              Ug79V8Report(outcome,correct,missing,uncertain,reason);
+                        if(correct!=32 || uncertain)''',
+          '''              Ug79V8Report(outcome,correct,missing,uncertain,reason);
+                        if(ug79_v82_enabled) Ug79V82TrialLog(outcome,correct,missing,uncertain);
+                        if(correct!=32 || uncertain)''',
+          'append per-profile results')
+          
+          # The old Panel is reused; test program selector does not obscure the stream.
+          c = one(c,
+          '''              auto *start=new QPushButton(QStringLiteral("CALIBRATE WALL + RUN TIMED BATCHES"),dialog);''',
+          '''              auto *lab=new QComboBox(dialog);
+                        lab->addItem(QStringLiteral("Baseline: repeat entered timing"));
+                        lab->addItem(QStringLiteral("Broad: individual sweeps + complete reopen/Cross grid"));
+                        lab->addItem(QStringLiteral("Finalist: full 2x2x2x2x2 timing factorial"));
+                        lab->addItem(QStringLiteral("Endurance: repeated baseline"));
+                        lab->setCurrentIndex(0);
+                        lab->setVisible(qEnvironmentVariable("CHIAKI_KB_LAB")==QStringLiteral("1"));
+                        layout->addWidget(lab);
+                        auto *start=new QPushButton(QStringLiteral("CALIBRATE WALL + RUN TIMED BATCHES"),dialog);''',
+          'opt-in sweep programme selection')
+          c = one(c,
+          '''              QObject::connect(start,&QPushButton::clicked,dialog,[this,r,c,n](){
+                            Ug79V8Start(r->value(),c->value(),n->value());
+                        });''',
+          '''              QObject::connect(start,&QPushButton::clicked,dialog,[this,r,c,n,lab](){
+                            if(qEnvironmentVariable("CHIAKI_KB_LAB")==QStringLiteral("1"))
+                                Ug79V82Start(lab->currentIndex(),n->value(),r->value(),c->value());
+                            else Ug79V8Start(r->value(),c->value(),n->value());
+                        });''',
+          'start selected programme')
+          c = one(c,
+          '''              dialog->setWindowTitle(QStringLiteral("Chiaki v8 - Visual Wall Speed Tester"));''',
+          '''              dialog->setWindowTitle(QStringLiteral("Chiaki v8.2 - Visual Reliability Laboratory"));''',
+          'lab title')
+          
+          # Methods inserted immediately before v8.1 recovery. The v8.1 implementation
+          # remains compiled but is never called during the opt-in lab mode.
+          methods = r'''
+          // v8.2 adaptive test plan and bounded visual recovery.
+          void StreamSession::Ug79V82Start(int mode,int repeats,int reopen,int cross)
+          {
+              if(ug79_v82_enabled || ug79_v8_running || !connected) return;
+              ug79_v82_plan.clear();
+              auto add=[this](int r,int c,int rh=170,int ch=170,int accept=160) {
+                  Ug79V82Profile p;
+                  p.reopen=r;p.cross=c;p.rh=rh;p.ch=ch;p.accept=accept;
+                  ug79_v82_plan.append(p);
+              };
+              add(reopen,cross);
+              if(mode==1) {
+                  const int delays[]={250,400,550,700,850};
+                  for(int v:delays) {add(v,cross);add(reopen,v);}
+                  for(int v:{110,170,230}) {add(reopen,cross,v);add(reopen,cross,170,v);}
+                  for(int v:{120,160,220}) add(reopen,cross,170,170,v);
+                  // Complete 5x5 two-factor timing grid; periodically anchor to baseline.
+                  for(int i=0;i<5;++i) for(int j=0;j<5;++j) {
+                      add(delays[i],delays[(j*3+i)%5]);
+                  }
+              } else if(mode==2) {
+                  // Full factorial across five dimensions: 32 combinations.
+                  for(int bits=0;bits<32;++bits)
+                      add((bits&1)?550:400,(bits&2)?620:400,
+                          (bits&4)?190:150,(bits&8)?190:150,(bits&16)?220:160);
+              }
+              if(mode==1 || mode==2) {
+                  // Stable pseudo-random order: repeatable, but spreads timing effects.
+                  quint32 seed=0xC0FFEEu;
+                  for(int i=ug79_v82_plan.size()-1;i>1;--i) {
+                      seed=seed*1664525u+1013904223u;
+                      const int j=1+int(seed%quint32(i));
+                      ug79_v82_plan.swapItemsAt(i,j);
+                  }
+                  QVector<Ug79V82Profile> shuffled=ug79_v82_plan;
+                  ug79_v82_plan.clear();
+                  Ug79V82Profile base; base.reopen=reopen;base.cross=cross;
+                  for(int i=0;i<shuffled.size();++i) {
+                      ug79_v82_plan.append(shuffled.at(i));
+                      if((i+1)%6==0) ug79_v82_plan.append(base);
+                  }
+                  const QVector<Ug79V82Profile> once=ug79_v82_plan;
+                  for(int k=1;k<repeats;++k) ug79_v82_plan+=once;
+              }
+              ug79_v82_rh=170;ug79_v82_ch=170;ug79_v82_accept=160;
+              ug79_v82_attempts=0;ug79_v82_recoveries_trial=0;
+              ug79_v82_recoveries_profile=0;ug79_v82_abort_current=false;
+              ug79_v82_game_ref=QImage();ug79_v82_chat_ref=QImage();
+              ug79_v82_mask.clear();ug79_v82_learning_failed=false;
+              ++ug79_v82_token;
+              ug79_v82_enabled=true;
+              Ug79V8Start(reopen,cross,(mode==0 || mode==3)?repeats:1);
+              if(!ug79_v8_running) {ug79_v82_enabled=false;return;}
+              if(mode!=3) ug79_v8_repeats=ug79_v82_plan.size();
+              Ug79V8Log(QStringLiteral("V82_LAB_START mode=%1 profiles=%2 repeats=%3")
+                  .arg(mode).arg(ug79_v82_plan.size()).arg(repeats));
+          }
+          
+          void StreamSession::Ug79V82ChooseProfile()
+          {
+              if(ug79_v8_completed>=ug79_v82_plan.size()) return;
+              const Ug79V82Profile p=ug79_v82_plan.at(ug79_v8_completed);
+              ug79_v8_reopen=p.reopen;ug79_v8_cross=p.cross;
+              ug79_v82_rh=p.rh;ug79_v82_ch=p.ch;ug79_v82_accept=p.accept;
+              ug79_v82_attempts=0;ug79_v82_recoveries_trial=0;
+              ug79_v82_recoveries_profile=0;ug79_v82_abort_current=false;
+              ug79_v82_game_ref=QImage();ug79_v82_chat_ref=QImage();
+              ug79_v82_mask.clear();ug79_v82_learning_failed=false;
+              Ug79V8Log(QStringLiteral("V82_PROFILE index=%1/%2 reopen=%3 cross=%4 rh=%5 ch=%6 accept=%7")
+                  .arg(ug79_v8_completed+1).arg(ug79_v82_plan.size())
+                  .arg(p.reopen).arg(p.cross).arg(p.rh).arg(p.ch).arg(p.accept));
+          }
+          
+          void StreamSession::Ug79V82CaptureChat()
+          {
+              ug79_v82_chat_ref=Ug79V7Capture();
+              if(ug79_v82_game_ref.isNull() || ug79_v82_chat_ref.isNull() ||
+                 ug79_v82_game_ref.size()!=ug79_v82_chat_ref.size())
+              {ug79_v82_learning_failed=true;Ug79V8Log("V82_CLASSIFIER_CALIBRATION_NO_VIDEO");return;}
+              const int w=ug79_v82_game_ref.width(),h=ug79_v82_game_ref.height();
+              for(int y=0;y<h;y+=6) for(int x=0;x<w;x+=6) {
+                  const QColor g(ug79_v82_game_ref.pixel(x,y)),t(ug79_v82_chat_ref.pixel(x,y));
+                  const int d=qAbs(g.red()-t.red())+qAbs(g.green()-t.green())+
+                              qAbs(g.blue()-t.blue());
+                  if(d>=105) ug79_v82_mask.append(QPoint(x,y));
+              }
+              if(ug79_v82_mask.size()<120 || ug79_v82_mask.size()>12000) {
+                  ug79_v82_learning_failed=true;
+                  Ug79V8Log(QStringLiteral("V82_CLASSIFIER_UNCERTAIN_MASK pixels=%1")
+                              .arg(ug79_v82_mask.size()));
+              } else Ug79V8Log(QStringLiteral("V82_CLASSIFIER_READY pixels=%1")
+                                 .arg(ug79_v82_mask.size()));
+          }
+          
+          // 0 unknown, 1 gameplay, 2 Minecraft chat. No OSK inference from one image.
+          int StreamSession::Ug79V82Classify(const QImage &img) const
+          {
+              if(ug79_v82_learning_failed || ug79_v82_mask.size()<120 || img.isNull() ||
+                 img.size()!=ug79_v82_game_ref.size() ||
+                 img.size()!=ug79_v82_chat_ref.size()) return 0;
+              qint64 eg=0,ec=0;
+              for(const QPoint &p:ug79_v82_mask) {
+                  const QColor a(img.pixel(p)),g(ug79_v82_game_ref.pixel(p));
+                  const QColor t(ug79_v82_chat_ref.pixel(p));
+                  eg+=qAbs(a.red()-g.red())+qAbs(a.green()-g.green())+qAbs(a.blue()-g.blue());
+                  ec+=qAbs(a.red()-t.red())+qAbs(a.green()-t.green())+qAbs(a.blue()-t.blue());
+              }
+              const int n=ug79_v82_mask.size();
+              const int dg=int(eg/n),dc=int(ec/n);
+              // Deliberately conservative: visual ambiguity must NOT trigger blind buttons.
+              if(dg<48 && dg+42<dc) return 1;
+              if(dc<48 && dc+42<dg) return 2;
+              return 0;
+          }
+          
+          void StreamSession::Ug79V82RecoverOpen()
+          {
+              // Called only for phase-1 timeout: NO text for this command was transmitted.
+              if(!ug79_v82_enabled || !ug79_v8_running || !connected ||
+                 ug79_batch_active || ug79_batch_keyboard_open || ug79_v8_recovering)
+              {Ug79V8Stop(QStringLiteral("V82 unsafe state at reopen recovery"));return;}
+              ++ug79_v82_attempts;
+              ++ug79_v82_recoveries_trial;
+              ++ug79_v82_recoveries_profile;
+              const quint64 token=++ug79_v82_token;
+              ug79_v8_recovering=true;
+              Ug79V8Log(QStringLiteral("V82_REOPEN_TIMEOUT stage=%1 command=%2 attempt=%3")
+                  .arg(ug79_v8_stage).arg(ug79_batch_index+1).arg(ug79_v82_attempts));
+              if(ug79_v82_attempts>3 || ug79_v82_recoveries_profile>24) {
+                  if(ug79_v8_stage!=5) {
+                      Ug79V8Stop(QStringLiteral("V82 retry budget exhausted during calibration"));return;
+                  }
+                  ug79_v82_abort_current=true;
+                  Ug79V8Log(QStringLiteral("V82_PROFILE_REOPEN_EXHAUSTED: verify UI then score partial wall"));
+              }
+              QTimer::singleShot(220,this,[this,token](){Ug79V82Observe(token,0,0);});
+          }
+          
+          void StreamSession::Ug79V82Observe(quint64 token,int pass,int known)
+          {
+              if(!ug79_v82_enabled || !ug79_v8_running || !ug79_v8_recovering ||
+                 ug79_v82_token!=token || !connected) return;
+              if(ug79_batch_keyboard_open || ug79_batch_active) {
+                  Ug79V8Stop(QStringLiteral("V82 unexpected keyboard/queue state during recovery"));return;
+              }
+              const int state=Ug79V82Classify(Ug79V7Capture());
+              if(!state && !known && pass<2) {
+                  Ug79V8Log(QStringLiteral("V82_FRAME_UNCERTAIN_RECHECK pass=%1").arg(pass));
+                  QTimer::singleShot(300,this,[this,token,pass](){Ug79V82Observe(token,pass+1,0);});
+                  return;
+              }
+              if(!state || (known && known!=state)) {
+                  const QString base=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG");
+                  if(!base.isEmpty())Ug79V7Capture().save(base+QStringLiteral(".v82-uncertain.png"),"PNG");
+                  Ug79V8Log(QStringLiteral("V82_UNKNOWN_UI pass=%1 state=%2 previous=%3")
+                      .arg(pass).arg(state).arg(known));
+                  Ug79V8Stop(QStringLiteral("V82 UI not confidently classified; no blind inputs"));
+                  return;
+              }
+              if(!known) {
+                  QTimer::singleShot(220,this,[this,token,pass,state](){Ug79V82Observe(token,pass,state);});
+                  return;
+              }
+              Ug79V8Log(QStringLiteral("V82_UI_CONFIRMED state=%1 pass=%2")
+                  .arg(state==1?QStringLiteral("GAMEPLAY"):QStringLiteral("CHAT"))
+                  .arg(pass));
+              if(state==1) {
+                  if(ug79_v82_abort_current) {
+                      ug79_v8_recovering=false;
+                      ug79_v8_trial_ms=ug79_v4_clock.elapsed();
+                      Ug79V8Log(QStringLiteral("V82_SAFE_SKIP profile=%1 partial wall scored")
+                                  .arg(ug79_v8_completed+1));
+                      Ug79V8Score();  // Verifies every actual block and resets the wall.
+                      return;
+                  }
+                  Ug79V82Retry(token,false);return;
+              }
+              if(!ug79_v82_abort_current && pass==0 && ug79_v82_attempts<=1)
+                 {Ug79V82Retry(token,true);return;}
+              Ug79V82PulseCircle(token,0);
+          }
+          
+          void StreamSession::Ug79V82PulseCircle(quint64 token,int round)
+          {
+              if(!ug79_v82_enabled || !ug79_v8_running || !ug79_v8_recovering ||
+                 ug79_v82_token!=token || !connected) return;
+              if(round>=2) {
+                  Ug79V8Stop(QStringLiteral("V82 Circle failed to restore verifiable gameplay"));return;
+              }
+              chiaki_controller_state_set_idle(&ug79_automation_state);
+              ug79_automation_state.buttons=CHIAKI_CONTROLLER_BUTTON_MOON;
+              SendFeedbackState();
+              Ug79V8Log(QStringLiteral("V82_CIRCLE_DOWN round=%1").arg(round+1));
+              QTimer::singleShot(170,this,[this,token,round](){
+                  chiaki_controller_state_set_idle(&ug79_automation_state);
+                  if(connected)SendFeedbackState();
+                  if(!ug79_v82_enabled || !ug79_v8_running || !ug79_v8_recovering ||
+                     ug79_v82_token!=token || !connected)return;
+                  QTimer::singleShot(480,this,[this,token,round](){
+                      if(!ug79_v82_enabled || !ug79_v8_running || !ug79_v8_recovering ||
+                         ug79_v82_token!=token || !connected)return;
+                      const int state=Ug79V82Classify(Ug79V7Capture());
+                      if(state==1) {
+                          QTimer::singleShot(220,this,[this,token](){Ug79V82Observe(token,1,1);});
+                      } else if(state==2 && round==0) Ug79V82PulseCircle(token,1);
+                      else Ug79V8Stop(QStringLiteral("V82 unknown UI after Circle; no further actions"));
+                  });
+              });
+          }
+          
+          void StreamSession::Ug79V82Retry(quint64 token,bool crossOnly)
+          {
+              if(!ug79_v82_enabled || !ug79_v8_running || !ug79_v8_recovering ||
+                 ug79_v82_token!=token || !connected)return;
+              ug79_v8_recovering=false;
+              ug79_batch_active=true;
+              Ug79V8Log(QStringLiteral("V82_RETRY kind=%1 command=%2")
+                  .arg(crossOnly?QStringLiteral("CROSS_ONLY"):QStringLiteral("RIGHT_CROSS"))
+                  .arg(ug79_batch_index+1));
+              if(!crossOnly) {Ug79BatchSetPhase(5,0);Ug79BatchReopen();return;}
+              Ug79BatchSetPhase(1,3800);
+              const quint64 stage=ug79_batch_stage_token;
+              chiaki_controller_state_set_idle(&ug79_automation_state);
+              ug79_automation_state.buttons=CHIAKI_CONTROLLER_BUTTON_CROSS;
+              SendFeedbackState();
+              QTimer::singleShot(ug79_v82_ch,this,[this,stage](){
+                  chiaki_controller_state_set_idle(&ug79_automation_state);
+                  if(connected)SendFeedbackState();
+                  if(!ug79_batch_active || ug79_batch_stage_token!=stage || !connected)return;
+                  Ug79V8Log(QStringLiteral("V82_CROSS_ONLY_SENT"));
+              });
+          }
+          
+          void StreamSession::Ug79V82TrialLog(const QString &outcome,int correct,int missing,int uncertain) const
+          {
+              const QString base=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG");
+              if(base.isEmpty())return;
+              QFile f(base+QStringLiteral(".v82-profiles.csv"));
+              if(!f.open(QIODevice::Append|QIODevice::WriteOnly|QIODevice::Text))return;
+              if(f.size()==0)f.write("utc,session,profile,reopen_ms,right_cross_ms,right_hold_ms,cross_hold_ms,accept_delay_ms,correct,missing,uncertain,recoveries,elapsed_ms,outcome\n");
+              f.write(QStringLiteral("%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14\n")
+                  .arg(QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs))
+                  .arg(ug79_v8_session).arg(ug79_v8_completed+1)
+                  .arg(ug79_v8_reopen).arg(ug79_v8_cross)
+                  .arg(ug79_v82_rh).arg(ug79_v82_ch).arg(ug79_v82_accept)
+                  .arg(correct).arg(missing).arg(uncertain)
+                  .arg(ug79_v82_recoveries_trial).arg(ug79_v8_trial_ms)
+                  .arg(ug79_v82_abort_current ? QStringLiteral("SAFE_SKIP_REOPEN_EXHAUSTED") : outcome).toUtf8());
+          }
+          
+          '''
+          c = one(c,'void StreamSession::Ug79V8RecoverReopen()',methods+'void StreamSession::Ug79V8RecoverReopen()', 'recovery and sweep implementation')
+          
+          # Every in-memory anchor validated BEFORE any persistent write.
+          cpp_path.write_text(c,encoding='utf-8')
+          hpp_path.write_text(h,encoding='utf-8')
+          print('V8.2 experimental patch applied to runner checkout; original GitHub source unchanged.')
+          PY_V82
+
       - name: Build libplacebo
         run: |
           scripts/build-libplacebo-windows.sh
@@ -3067,14 +3484,83 @@ jobs:
           ''',encoding='utf-8')
           PY
 
+      - name: Add v8.2 reliability laboratory launcher and instructions
+        run: |
+          python - <<'PY_LAB'
+          from pathlib import Path
+          f=Path('chiaki-ng-Win')
+          cmds=[
+              '@echo off',
+              'cd /d "%~dp0"',
+              'set "VK_LOADER_DRIVERS_DISABLE=*dzn*"',
+              'set "CHIAKI_KB_PROBE=both"',
+              'set "CHIAKI_KB_DIAG_LOG=%~dp0KBPROBE-Reliability-v8-2.log"',
+              'set "CHIAKI_KB_BATCH=1"',
+              'set "CHIAKI_KB_FULLCYCLE=1"',
+              'set "CHIAKI_KB_SPEED_PROFILES=1"',
+              'set "CHIAKI_KB_BUILD_TEST=0"',
+              'set "CHIAKI_KB_AUTO_VERIFY=0"',
+              'set "CHIAKI_KB_WALL_VERIFY=1"',
+              'set "CHIAKI_KB_LAB=1"',
+              'start "" "%~dp0chiaki.exe"',
+          ]
+          (f/'TEST-Bedrock-Reliability-v8-2.cmd').write_bytes(
+              ('\r\n'.join(cmds)+'\r\n').encode('utf-8'))
+          (f/'README-V8-2-RELIABILITY.txt').write_text('''CHIAKI V8.2 - RELIABILITY LAB (EXPERIMENTAL)
+          Only use a disposable Creative+cheats Minecraft Bedrock world.
+          Preserve your working v8.1 directory. Extract this build to its own folder.
+          Stand above the ground at ~Y 260, clear sky in front, >=640x360 video,
+          with the video unobscured. Close chat and the PS4 keyboard before starting.
+          The tester sends /tp and modifies a test wall at positive Z+20, X -7..+7,
+          and Y -1..+5 relative to the player's position. Do NOT use near valued builds.
+          It uses the known v8.1 32-block visual wall for every complete trial.
+          Open TEST-Bedrock-Reliability-v8-2.cmd. Choose a test programme:
+          BASELINE - repeat entered reopen/Cross settings;
+          BROAD - 5x5 reopen/Cross grid, separate hold/Accept sweeps,
+                  and periodically repeated baseline (deterministic shuffle);
+          FINALIST - exhaustive 2^5 combinations of reopen, Cross delay,
+                     Right hold, Cross hold and Accept delay;
+          ENDURANCE - repeat the baseline with v8.1's normal repeat controls.
+          For Broad/Finalist, Repeat batches multiplies the set of profiles (1-10).
+          Baseline example: reopen 400ms, Right-to-Cross 400ms.
+          The first run should be supervised. Keep the player stationary.
+
+          V8.2 CALIBRATION: records two in-memory reference video frames at the
+          first chat opening (gameplay and open chat), and re-learns on every
+          new timed profile. Image-difference discrimination must be strong enough.
+          If opening times out, the tester inspects TWO consecutive frames.
+          Verified GAMEPLAY -> retry Right+Cross;
+          Verified CHAT -> try Cross alone, then controlled Circle and recheck;
+          UNKNOWN -> stop, save one diagnostic frame, do not send blind inputs.
+          It will NOT retry a command once text was transmitted. If a bad profile
+          exhausts its retry budget, it may skip to the next profile ONLY after
+          stable gameplay has been verified, scoring the partial wall first.
+          Any ambiguous visual state or other native protocol error stops safely.
+
+          Outputs beside the launcher include:
+            KBPROBE-Reliability-v8-2.log
+            KBPROBE-Reliability-v8-2.log.v82-profiles.csv
+            KBPROBE-Reliability-v8-2.log.wall-results.csv
+            KBPROBE-Reliability-v8-2.log.wall-blocks.csv
+            KBPROBE-Reliability-v8-2.log.v82-uncertain.png (only on UI ambiguity)
+            KBPROBE-Reliability-v8-2.log.wall-last-failure.png (last wall issue)
+          The programme does not upload screenshots or telemetry. The CSV event
+          logs avoid typed text, account IDs, and session credentials.
+
+          The v8.2 patch is an opt-in layer above the v8.1 source injections.
+          Build/test calibration and classifications have not been validated on
+          your PS4 yet; do not assume it is production ready.
+          ''',encoding='utf-8')
+          PY_LAB
+
       - name: Package portable prototype
         run: |
-          zip -r chiaki-ng-bedrock-wall-v8-1-win64.zip chiaki-ng-Win
+          zip -r chiaki-ng-reliability-lab-v8-2-win64.zip chiaki-ng-Win
 
       - name: Upload portable prototype
         uses: actions/upload-artifact@v4
         with:
-          name: chiaki-ng-bedrock-wall-v8-1-win64
-          path: chiaki-ng-bedrock-wall-v8-1-win64.zip
+          name: chiaki-ng-reliability-lab-v8-2-win64
+          path: chiaki-ng-reliability-lab-v8-2-win64.zip
           if-no-files-found: error
           retention-days: 7
