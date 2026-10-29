@@ -1,4 +1,4 @@
-name: Build Chiaki-ng Windows - Visual Wall Calibration v8 (Experimental)
+name: Build Chiaki-ng Windows - Visual Wall Calibration v8.1 (Experimental)
 
 on:
   workflow_dispatch:
@@ -2937,9 +2937,11 @@ jobs:
               ug79_v8_recovering=false;
               ++ug79_v8_recovery_token;''','reset counters for new test')
           c=one(c,r'''ug79_batch_commands=commands;
-              ug79_batch_index=0;''',r'''ug79_batch_commands=commands;
               ug79_batch_index=0;
-              ug79_v8_reopen_attempts=0;''','reset consecutive failures for next batch')
+              ug79_v5_reopen_delay_ms=reopen;''',r'''ug79_batch_commands=commands;
+              ug79_batch_index=0;
+              ug79_v8_reopen_attempts=0;
+              ug79_v5_reopen_delay_ms=reopen;''','reset consecutive failures for next batch')
           c=one(c,'No auto-retry if keyboard state becomes unknown.',
               'On reopen timeout, attempt Circle twice, then Right + Cross up to two times. Never repeat a submitted world-changing command.',
               'update panel recovery explanation')
