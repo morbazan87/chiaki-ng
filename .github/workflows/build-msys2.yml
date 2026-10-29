@@ -1,4 +1,4 @@
-name: Build Chiaki-ng Windows - Visual Wall Calibration v8.1 (Experimental)
+name: Build Chiaki-ng Windows - v8.1 Screenshot Regions (Experimental)
 
 on:
   workflow_dispatch:
@@ -2482,58 +2482,49 @@ jobs:
                          QStringLiteral("ALIGN_POSITIVE_Z"));
           }
 
-          // Infer the projected grid from the difference between calibrated empty sky
-          // and known filled pattern. Refuse unexpected 8 x 4 geometry (fail closed).
+          // V8.1 reference regions measured from the user's proven 32/32 wall image.
+          // The calibration screenshots were 1924 x 1050. This is deliberately
+          // NOT an automatic search for columns and rows: HUD notifications
+          // and chat messages cannot introduce phantom target positions.
+          // The positions scale to the current video frame. Each run still
+          // learns live block and empty-sky colours from its own two frames.
           bool StreamSession::Ug79V8Learn()
           {
               if(ug79_v8_full.isNull() || ug79_v8_empty.isNull() ||
                  ug79_v8_full.size()!=ug79_v8_empty.size())return false;
               const int w=ug79_v8_full.width(),h=ug79_v8_full.height();
-              const int xl=w*17/100,xr=w*83/100,yt=h*25/100,yb=h*76/100;
-              QVector<int> hx(w,0),hy(h,0);
-              for(int y=yt;y<yb;y+=2)
-                  for(int x=xl;x<xr;x+=2)
-                  {
-                      const QColor a(ug79_v8_full.pixel(x,y));
-                      const QColor b(ug79_v8_empty.pixel(x,y));
-                      const int delta=qAbs(a.red()-b.red())+
-                          qAbs(a.green()-b.green())+qAbs(a.blue()-b.blue());
-                      if(delta>=110){++hx[x];++hy[y];}
-                  }
-              // Histograms use even pixel samples only; small holes tolerated.
-              auto groups=[](const QVector<int> &v,int lo,int hi,int threshold,int minimumWidth){
-                  QVector<QPair<int,int>> out;
-                  int start=-1,last=-1;
-                  for(int p=lo;p<hi;p+=2)
-                  {
-                      const bool present=v[p]>=threshold;
-                      if(present)
-                      {if(start<0)start=p;last=p;}
-                      else if(start>=0 && p-last>6)
-                      {if(last-start+2>=minimumWidth)out.append(qMakePair(start,last+1));
-                       start=last=-1;}
-                  }
-                  if(start>=0 && last-start+2>=minimumWidth)
-                      out.append(qMakePair(start,last+1));
-                  return out;
-              };
-              const auto xs=groups(hx,xl,xr,6,5);
-              const auto ys=groups(hy,yt,yb,8,5);
-              Ug79V8Log(QStringLiteral("CALIBRATION_GEOMETRY columns=%1 rows=%2 size=%3x%4")
-                  .arg(xs.size()).arg(ys.size()).arg(w).arg(h));
-              if(xs.size()!=8 || ys.size()!=4)return false;
+              if(w<640 || h<360)return false;
+              // Changes to the stream crop/aspect ratio invalidate screenshot
+              // pixel coordinates; do not report misleading speed results.
+              const qint64 aspectError=qAbs(qint64(w)*1050-qint64(h)*1924);
+              if(aspectError>qint64(h)*1924/25) // 4 percent tolerance
+              {
+                  Ug79V8Log(QStringLiteral("CALIBRATION_FRAME_ASPECT_MISMATCH width=%1 height=%2 reference=1924x1050")
+                      .arg(w).arg(h));
+                  return false;
+              }
+              // Permyriad-of-frame centres. Columns are left to right;
+              // rows are top to bottom (red, yellow, lime, magenta).
+              const int x10000[8]={3519,3945,4366,4792,5223,5650,6071,6497};
+              const int y10000[4]={3486,4267,5048,5829};
+              const int radiusX=qMax(3,w*70/10000);
+              const int radiusY=qMax(3,h*100/10000);
               ug79_v8_cells.clear();
+              Ug79V8Log(QStringLiteral("CALIBRATION_FIXED_REGIONS 8x4 frame=%1x%2 from_reference=1924x1050 rx=%3 ry=%4")
+                  .arg(w).arg(h).arg(radiusX).arg(radiusY));
               for(int row=0;row<4;++row)
                   for(int col=0;col<8;++col)
                   {
-                      const auto xx=xs[col],yy=ys[row];
-                      // Inset to avoid antialiasing and block-edge shadows.
-                      const int dx=qMax(1,(xx.second-xx.first)/5);
-                      const int dy=qMax(1,(yy.second-yy.first)/5);
-                      const QRect r(xx.first+dx,yy.first+dy,
-                          xx.second-xx.first-2*dx,yy.second-yy.first-2*dy);
-                      if(r.width()<3 || r.height()<3)return false;
-                      ug79_v8_cells.append(r);
+                      const int cx=(w*x10000[col]+5000)/10000;
+                      const int cy=(h*y10000[row]+5000)/10000;
+                      const QRect r(cx-radiusX,cy-radiusY,
+                          2*radiusX+1,2*radiusY+1);
+                      if(!ug79_v8_full.rect().contains(r))
+                      {
+                          Ug79V8Log(QStringLiteral("CALIBRATION_OUTSIDE_FRAME slot=%1")
+                              .arg(row*8+col+1));
+                          return false;
+                      }
                       qint64 difference=0,points=0;
                       for(int y=r.top();y<=r.bottom();y+=2)
                           for(int x=r.left();x<=r.right();x+=2)
@@ -2544,10 +2535,19 @@ jobs:
                                   qAbs(a.green()-b.green())+qAbs(a.blue()-b.blue());
                               ++points;
                           }
-                      if(points<6 || difference/points<100)
-                      {Ug79V8Log(QStringLiteral("CALIBRATION_WEAK_CELL slot=%1 delta=%2")
-                          .arg(row*8+col+1).arg(points?difference/points:0));return false;}
+                      const int avg=points?int(difference/points):0;
+                      if(points<12 || avg<100)
+                      {
+                          Ug79V8Log(QStringLiteral("CALIBRATION_WEAK_FIXED_REGION slot=%1 x=%2 y=%3 delta=%4 samples=%5")
+                              .arg(row*8+col+1).arg(cx).arg(cy)
+                              .arg(avg).arg(points));
+                          ug79_v8_cells.clear();
+                          return false;
+                      }
+                      ug79_v8_cells.append(r);
                   }
+              Ug79V8Log(QStringLiteral("CALIBRATION_FIXED_REGIONS_PASS count=%1")
+                  .arg(ug79_v8_cells.size()));
               return ug79_v8_cells.size()==32;
           }
 
@@ -3055,8 +3055,15 @@ jobs:
           session; no submitted command is replayed. Recovery time is included
           in timed trial throughput. Other failures stop rather than resend.
 
-          This is an experimental recovery build, not yet compiled or
-          PS4-validated. Keep the first run supervised. Do not use in a valuable world.
+          The 32 visual confirmation regions use normalized screen coordinates
+          measured from a known-good 1924x1050 reference capture, not row/column
+          discovery. The live filled and empty captures supply the colours.
+          Keep the same camera/FOV and video layout as the reference image.
+          If an expected region lacks strong block-vs-sky contrast, calibration
+          stops safely; inspect the saved reference images and log.
+
+          This is experimental and requires a new GitHub Actions build.
+          Keep the first run supervised. Do not use in a valuable world.
           ''',encoding='utf-8')
           PY
 
