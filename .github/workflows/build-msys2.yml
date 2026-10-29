@@ -3001,20 +3001,15 @@ jobs:
                   'Ug79BatchSetPhase(1, ug79_v82_enabled ? 3800 : 9500);', 'reopen watchdog')
           
           # Different input durations are enabled ONLY during stage-5 timed trials.
-          c = one(c,
-          '''              SendFeedbackState();
-                        QTimer::singleShot(170,this,[this,stage]() {''',
-          '''              SendFeedbackState();
-                        QTimer::singleShot((ug79_v82_enabled && ug79_v8_stage==5) ? ug79_v82_rh : 170,this,[this,stage]() {''',
-          'release Right with controlled duration')
-          c = one(c,
-          '''                      ug79_automation_state.buttons = CHIAKI_CONTROLLER_BUTTON_CROSS;
-                                SendFeedbackState();
-                                QTimer::singleShot(170,this,[this,stage]() {''',
-          '''                      ug79_automation_state.buttons = CHIAKI_CONTROLLER_BUTTON_CROSS;
-                                SendFeedbackState();
-                                QTimer::singleShot((ug79_v82_enabled && ug79_v8_stage==5) ? ug79_v82_ch : 170,this,[this,stage]() {''',
-          'release Cross with controlled duration')
+          
+          timer = 'QTimer::singleShot(170, this, [this, stage]() {'
+          if c.count(timer) != 2:
+              raise RuntimeError(f'V8.2 expected 2 button timers; found {c.count(timer)}')
+          c = c.replace(timer,
+              'QTimer::singleShot((ug79_v82_enabled && ug79_v8_stage==5) ? ug79_v82_rh : 170, this, [this, stage]() {', 1)
+          c = c.replace(timer,
+              'QTimer::singleShot((ug79_v82_enabled && ug79_v8_stage==5) ? ug79_v82_ch : 170, this, [this, stage]() {', 1)
+
           c = one(c, 'QTimer::singleShot(160, this, [this, stage]() {',
                   'QTimer::singleShot((ug79_v82_enabled && ug79_v8_stage==5) ? ug79_v82_accept : 160, this, [this, stage]() {',
                   'native Accept settle time')
