@@ -3000,8 +3000,7 @@ jobs:
           c = one(c, 'Ug79BatchSetPhase(1, 9500);',
                   'Ug79BatchSetPhase(1, ug79_v82_enabled ? 3800 : 9500);', 'reopen watchdog')
           
-          # Different input durations are enabled ONLY during stage-5 timed trials.
-          
+          # The Right and Cross timers are the only two 170ms timers in Reopen.
           timer = 'QTimer::singleShot(170, this, [this, stage]() {'
           if c.count(timer) != 2:
               raise RuntimeError(f'V8.2 expected 2 button timers; found {c.count(timer)}')
@@ -3009,7 +3008,7 @@ jobs:
               'QTimer::singleShot((ug79_v82_enabled && ug79_v8_stage==5) ? ug79_v82_rh : 170, this, [this, stage]() {', 1)
           c = c.replace(timer,
               'QTimer::singleShot((ug79_v82_enabled && ug79_v8_stage==5) ? ug79_v82_ch : 170, this, [this, stage]() {', 1)
-
+          
           c = one(c, 'QTimer::singleShot(160, this, [this, stage]() {',
                   'QTimer::singleShot((ug79_v82_enabled && ug79_v8_stage==5) ? ug79_v82_accept : 160, this, [this, stage]() {',
                   'native Accept settle time')
@@ -3033,72 +3032,56 @@ jobs:
                   'reset consecutive reopen failure counter after native open')
           
           # Recover before v8.1's unconditional Circle-Circle legacy path.
-          c = one(c,
-          '''              const bool reopen_timeout=ug79_v8_last_stop_phase==1 &&
-                            reason.contains(QStringLiteral("PS4 keyboard response timed out"));''',
-          '''              const bool reopen_timeout=ug79_v8_last_stop_phase==1 &&
-                            reason.contains(QStringLiteral("PS4 keyboard response timed out"));
-                        if(ug79_v82_enabled && reopen_timeout)
-                        {
-                            Ug79V82RecoverOpen();
-                            return;
-                        }''', 'opt-in classified recovery takeover')
+          # Match the unique logical condition, not surrounding spaces.
+          c = one(c, 'if(reopen_timeout && connected && !ug79_batch_keyboard_open &&',
+              'if(ug79_v82_enabled && reopen_timeout)\n'
+              '              {\n'
+              '                  Ug79V82RecoverOpen();\n'
+              '                  return;\n'
+              '              }\n'
+              '              if(reopen_timeout && connected && !ug79_batch_keyboard_open &&',
+              'opt-in classified recovery takeover')
           
-          # Free lab session state on STOP (including user abort, disconnect, or complete).
-          c = one(c,
-          '''              ug79_v8_running=false;
-                        ug79_v8_recovering=false;''',
-          '''              ug79_v8_running=false;
-                        ug79_v82_enabled=false;
-                        ++ug79_v82_token;
-                        ug79_v8_recovering=false;''',
-          'clear lab state when v8 stops')
+          # Clear lab-specific state on STOP, retaining v8.1 cleanup.
+          c = one(c, 'ug79_v8_running=false;\n              ug79_v8_recovering=false;',
+              'ug79_v8_running=false;\n              ug79_v82_enabled=false;\n'
+              '              ++ug79_v82_token;\n              ug79_v8_recovering=false;',
+              'clear lab state when v8 stops')
           
           # Select next profile AFTER wall was reset and checked empty.
-          c = one(c,
-          '''                      ug79_v8_stage=5;
-                                Ug79V8Send(Ug79V8WallCommands(),ug79_v8_reopen,''',
-          '''                      ug79_v8_stage=5;
-                                if(ug79_v82_enabled) Ug79V82ChooseProfile();
-                                Ug79V8Send(Ug79V8WallCommands(),ug79_v8_reopen,''',
-          'choose next profile only after clear verified')
+          c = one(c,'ug79_v8_stage=5;',
+                  'ug79_v8_stage=5;\n                      if(ug79_v82_enabled) Ug79V82ChooseProfile();',
+                  'choose next profile only after clear verified')
           
-          # Write compact per-profile statistics alongside the original 32-block CSV.
-          c = one(c,
-          '''              Ug79V8Report(outcome,correct,missing,uncertain,reason);
-                        if(correct!=32 || uncertain)''',
-          '''              Ug79V8Report(outcome,correct,missing,uncertain,reason);
-                        if(ug79_v82_enabled) Ug79V82TrialLog(outcome,correct,missing,uncertain);
-                        if(correct!=32 || uncertain)''',
-          'append per-profile results')
+          # Preserve existing wall scoring, append per-profile statistics.
+          c = one(c,'Ug79V8Report(outcome,correct,missing,uncertain,reason);',
+                  'Ug79V8Report(outcome,correct,missing,uncertain,reason);\n'
+                  '              if(ug79_v82_enabled) Ug79V82TrialLog(outcome,correct,missing,uncertain);',
+                  'append per-profile results')
           
-          # The old Panel is reused; test program selector does not obscure the stream.
+          # Reuse v8 visual wall panel, matching unique logical lines.
+          c = one(c, 'auto *start=new QPushButton(QStringLiteral("CALIBRATE WALL + RUN TIMED BATCHES"),dialog);',
+              'auto *lab=new QComboBox(dialog);\n'
+              '              lab->addItem(QStringLiteral("Baseline: repeat entered timing"));\n'
+              '              lab->addItem(QStringLiteral("Broad: individual sweeps + complete reopen/Cross grid"));\n'
+              '              lab->addItem(QStringLiteral("Finalist: full 2x2x2x2x2 timing factorial"));\n'
+              '              lab->addItem(QStringLiteral("Endurance: repeated baseline"));\n'
+              '              lab->setCurrentIndex(0);\n'
+              '              lab->setVisible(qEnvironmentVariable("CHIAKI_KB_LAB")==QStringLiteral("1"));\n'
+              '              layout->addWidget(lab);\n'
+              '              auto *start=new QPushButton(QStringLiteral("CALIBRATE WALL + RUN TIMED BATCHES"),dialog);',
+              'opt-in sweep programme selection')
           c = one(c,
-          '''              auto *start=new QPushButton(QStringLiteral("CALIBRATE WALL + RUN TIMED BATCHES"),dialog);''',
-          '''              auto *lab=new QComboBox(dialog);
-                        lab->addItem(QStringLiteral("Baseline: repeat entered timing"));
-                        lab->addItem(QStringLiteral("Broad: individual sweeps + complete reopen/Cross grid"));
-                        lab->addItem(QStringLiteral("Finalist: full 2x2x2x2x2 timing factorial"));
-                        lab->addItem(QStringLiteral("Endurance: repeated baseline"));
-                        lab->setCurrentIndex(0);
-                        lab->setVisible(qEnvironmentVariable("CHIAKI_KB_LAB")==QStringLiteral("1"));
-                        layout->addWidget(lab);
-                        auto *start=new QPushButton(QStringLiteral("CALIBRATE WALL + RUN TIMED BATCHES"),dialog);''',
-          'opt-in sweep programme selection')
-          c = one(c,
-          '''              QObject::connect(start,&QPushButton::clicked,dialog,[this,r,c,n](){
-                            Ug79V8Start(r->value(),c->value(),n->value());
-                        });''',
-          '''              QObject::connect(start,&QPushButton::clicked,dialog,[this,r,c,n,lab](){
-                            if(qEnvironmentVariable("CHIAKI_KB_LAB")==QStringLiteral("1"))
-                                Ug79V82Start(lab->currentIndex(),n->value(),r->value(),c->value());
-                            else Ug79V8Start(r->value(),c->value(),n->value());
-                        });''',
-          'start selected programme')
-          c = one(c,
-          '''              dialog->setWindowTitle(QStringLiteral("Chiaki v8 - Visual Wall Speed Tester"));''',
-          '''              dialog->setWindowTitle(QStringLiteral("Chiaki v8.2 - Visual Reliability Laboratory"));''',
-          'lab title')
+              'QObject::connect(start,&QPushButton::clicked,dialog,[this,r,c,n](){',
+              'QObject::connect(start,&QPushButton::clicked,dialog,[this,r,c,n,lab](){',
+              'connect lab to start button')
+          c = one(c,'Ug79V8Start(r->value(),c->value(),n->value());',
+              'if(qEnvironmentVariable("CHIAKI_KB_LAB")==QStringLiteral("1"))\n'
+              '                      Ug79V82Start(lab->currentIndex(),n->value(),r->value(),c->value());\n'
+              '                  else Ug79V8Start(r->value(),c->value(),n->value());',
+              'start selected programme')
+          c = one(c,'dialog->setWindowTitle(QStringLiteral("Chiaki v8 - Visual Wall Speed Tester"));',
+              'dialog->setWindowTitle(QStringLiteral("Chiaki v8.2 - Visual Reliability Laboratory"));','lab title')
           
           # Methods inserted immediately before v8.1 recovery. The v8.1 implementation
           # remains compiled but is never called during the opt-in lab mode.
