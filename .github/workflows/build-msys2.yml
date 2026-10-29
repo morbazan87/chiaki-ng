@@ -3043,10 +3043,16 @@ jobs:
               'opt-in classified recovery takeover')
           
           # Clear lab-specific state on STOP, retaining v8.1 cleanup.
-          c = one(c, 'ug79_v8_running=false;\n              ug79_v8_recovering=false;',
-              'ug79_v8_running=false;\n              ug79_v82_enabled=false;\n'
-              '              ++ug79_v82_token;\n              ug79_v8_recovering=false;',
-              'clear lab state when v8 stops')
+          # Match the uniquely named stop function instead of assuming dedented C++ spacing.
+          import re
+          stop_pattern = r'(void StreamSession::Ug79V8Stop\(const QString &reason\)\s*\{\s*if\(!ug79_v8_running\)return;\s*)([ \t]*)ug79_v8_running=false;'
+          matches = list(re.finditer(stop_pattern, c))
+          if len(matches) != 1:
+              raise RuntimeError(f'V8.2 REFUSED clear lab state when v8 stops: expected 1 matching Stop method; found {len(matches)}')
+          print('V8.2 validated clear lab state when v8 stops')
+          c = re.sub(stop_pattern, lambda m: m.group(1) + m.group(2) +
+              'ug79_v8_running=false;\n' + m.group(2) + 'ug79_v82_enabled=false;\n' +
+              m.group(2) + '++ug79_v82_token;', c, count=1)
           
           # Select next profile AFTER wall was reset and checked empty.
           c = one(c,'ug79_v8_stage=5;',
