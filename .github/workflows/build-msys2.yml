@@ -1,4 +1,4 @@
-name: Build Chiaki-ng Windows - Resilient AutoVerify v7.3
+name: Build Chiaki-ng Windows - Visual Wall Calibration v8 (Experimental)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-windows_x64-msys2:
-    name: Build Windows x64 Bedrock Resilient Verifier v7.3
+    name: Build Windows x64 Bedrock Visual Wall v8
     runs-on: windows-latest
     defaults:
       run:
@@ -2305,6 +2305,472 @@ jobs:
           print('V7.3 resilient 1 ms verifier patch complete. Opt-in ONLY.')
           PY
 
+      - name: Inject opt-in v8 reference-wall calibration and speed tester (temporary checkout)
+        run: |
+          python - <<'PY_V8'
+          from pathlib import Path
+          hpath=Path('gui/include/streamsession.h')
+          cpath=Path('gui/src/streamsession.cpp')
+          h=hpath.read_text(encoding='utf-8')
+          c=cpath.read_text(encoding='utf-8')
+          def one(src, old, new, label):
+              n=src.count(old)
+              if n!=1:
+                  raise RuntimeError(f'WALL V8 {label}: one verified anchor required; got {n}')
+              return src.replace(old,new,1)
+
+          # Keep proven keyboard sender, protocol events and the v7.3 branch untouched.
+          # A separate launcher gates the v8 wall engine. No v7.3 test is launched.
+          h=one(h,'#include <QRect>\n#include <QVector>',
+                '#include <QRect>\n#include <QVBoxLayout>\n#include <QVector>',
+                'v8 QVBoxLayout forward type include')
+          h=one(h, 'bool ug79_v7_running = false;',
+          r'''bool ug79_v7_running = false;
+              bool ug79_v8_running=false;
+              int ug79_v8_stage=0; // 1 align, 2 clear, 3 calibration, 4 clear, 5 timed, 6 reset
+              int ug79_v8_reopen=400;
+              int ug79_v8_cross=400;
+              int ug79_v8_repeats=3;
+              int ug79_v8_completed=0;
+              qint64 ug79_v8_trial_ms=0;
+              QString ug79_v8_session;
+              QImage ug79_v8_empty;
+              QImage ug79_v8_full;
+              QVector<QRect> ug79_v8_cells;
+              QPointer<QLabel> ug79_v8_status;
+              QStringList Ug79V8WallCommands() const;
+              void Ug79V8Start(int reopen,int cross,int repeats);
+              void Ug79V8Stop(const QString &reason);
+              void Ug79V8Send(const QStringList &commands,int reopen,int cross,const QString &phase);
+              void Ug79V8OnBatchStop(const QString &reason);
+              bool Ug79V8Learn();
+              bool Ug79V8EmptyVerified() const;
+              void Ug79V8Score();
+              void Ug79V8Log(const QString &message) const;
+              void Ug79V8Report(const QString &outcome,int correct,int missing,int uncertain,const QString &reason) const;
+              void Ug79V8ShowPanel(QDialog *dialog,QVBoxLayout *layout);
+              ''' , 'v8 state and method declarations')
+
+          # Insert standalone V8 implementation immediately before v3 BatchStop.
+          # This uses the existing reliable Qt screen grab and native keyboard sender.
+          methods=r'''// V8: calibrated world-block pattern observer. All work is local to the PC.
+          // Never transmit screenshots or gameplay images anywhere.
+          void StreamSession::Ug79V8Log(const QString &message) const
+          {
+              const QString path=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG");
+              if(path.isEmpty()) return;
+              QFile f(path);
+              if(f.open(QIODevice::Append|QIODevice::WriteOnly|QIODevice::Text))
+                  f.write((QStringLiteral("WALL_V8 utc_ms=%1 session=%2 %3\n")
+                    .arg(QDateTime::currentMSecsSinceEpoch()).arg(ug79_v8_session,message)).toUtf8());
+          }
+
+          QStringList StreamSession::Ug79V8WallCommands() const
+          {
+              // One metre blocks; one-block gaps; 15w x 7h; Z+20 is positive Z view.
+              // Every command changes one individually identifiable location.
+              const int ys[4]={5,3,1,-1};
+              const QString colors[4]={QStringLiteral("red_concrete"),
+                  QStringLiteral("yellow_concrete"),QStringLiteral("lime_concrete"),
+                  QStringLiteral("magenta_concrete")};
+              QStringList list;
+              for(int row=0;row<4;++row)
+                  for(int col=0;col<8;++col)
+                      list << QStringLiteral("/setblock ~%1 ~%2 ~20 %3")
+                          .arg(-7+2*col).arg(ys[row]).arg(colors[row]);
+              return list;
+          }
+
+          void StreamSession::Ug79V8Report(const QString &outcome,int correct,
+              int missing,int uncertain,const QString &reason) const
+          {
+              const QString base=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG");
+              if(base.isEmpty()) return;
+              QFile csv(base+QStringLiteral(".wall-results.csv"));
+              if(!csv.open(QIODevice::Append|QIODevice::WriteOnly|QIODevice::Text))
+              {Ug79V8Log(QStringLiteral("ERROR: cannot append results CSV"));return;}
+              if(csv.size()==0)
+                  csv.write("utc,session,trial,reopen_ms,right_cross_ms,elapsed_ms,"
+                            "correct,missing,uncertain,rate_correct_per_min,outcome,reason\n");
+              QString clean=reason;
+              clean.replace(QLatin1Char(','),QLatin1Char(';'));
+              clean.replace(QLatin1Char('\n'),QLatin1Char(' '));
+              const double rate=ug79_v8_trial_ms>0 ?
+                  60000.0*correct/double(ug79_v8_trial_ms):0.0;
+              const QString line=QStringLiteral("%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12\n")
+                  .arg(QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs))
+                  .arg(ug79_v8_session).arg(ug79_v8_completed+1)
+                  .arg(ug79_v8_reopen).arg(ug79_v8_cross).arg(ug79_v8_trial_ms)
+                  .arg(correct).arg(missing).arg(uncertain)
+                  .arg(rate,0,'f',3).arg(outcome).arg(clean);
+              csv.write(line.toUtf8());
+          }
+
+          void StreamSession::Ug79V8Stop(const QString &reason)
+          {
+              if(!ug79_v8_running)return;
+              ug79_v8_running=false;
+              ug79_v8_stage=0;
+              Ug79V8Log(QStringLiteral("STOP reason=")+reason);
+              if(ug79_batch_active)
+                  Ug79BatchStop(QStringLiteral("WALL_V8 STOP: ")+reason);
+              if(ug79_v8_status)
+                  ug79_v8_status->setText(QStringLiteral("Stopped: ")+reason+
+                      QStringLiteral(". Results beside the v8 launcher."));
+              if(ug79_v5_profile_selector)
+                  ug79_v5_profile_selector->setEnabled(true);
+          }
+
+          void StreamSession::Ug79V8Send(const QStringList &commands,int reopen,int cross,
+              const QString &phase)
+          {
+              if(!ug79_v8_running)return;
+              if(!connected || ug79_batch_active || ug79_batch_keyboard_open)
+              {Ug79V8Stop(QStringLiteral("Unsafe keyboard/gameplay state before ")+phase);return;}
+              if(commands.isEmpty() || commands.size()>40)
+              {Ug79V8Stop(QStringLiteral("Invalid command count for ")+phase);return;}
+              for(const QString &c:commands)
+                  if(!c.startsWith(QLatin1Char('/')) || c.toUtf8().size()>80)
+                  {Ug79V8Stop(QStringLiteral("Invalid Bedrock command during ")+phase);return;}
+              ug79_batch_commands=commands;
+              ug79_batch_index=0;
+              ug79_v5_reopen_delay_ms=reopen;
+              ug79_v5_right_cross_delay_ms=cross;
+              ug79_v5_profile_name=QStringLiteral("WALL_V8_%1_%2_%3").arg(phase).arg(reopen).arg(cross);
+              ug79_v4_clock.start();
+              ug79_batch_active=true;
+              if(ug79_v5_profile_selector)ug79_v5_profile_selector->setEnabled(false);
+              Ug79V8Log(QStringLiteral("BATCH_START phase=%1 commands=%2 reopen=%3 cross=%4")
+                  .arg(phase).arg(commands.size()).arg(reopen).arg(cross));
+              if(ug79_v8_status)
+                  ug79_v8_status->setText(QStringLiteral("%1: sending %2 commands (%3/%4 ms), completed %5/%6 trials")
+                      .arg(phase).arg(commands.size()).arg(reopen).arg(cross)
+                      .arg(ug79_v8_completed).arg(ug79_v8_repeats));
+              Ug79BatchSetPhase(5,0);
+              Ug79BatchReopen();
+          }
+
+          void StreamSession::Ug79V8Start(int reopen,int cross,int repeats)
+          {
+              if(qEnvironmentVariable("CHIAKI_KB_WALL_VERIFY")!=QStringLiteral("1") ||
+                 ug79_v8_running || ug79_v7_running || !connected ||
+                 ug79_batch_active || ug79_batch_keyboard_open)return;
+              if(reopen<150 || reopen>1500 || cross<200 || cross>1500 ||
+                 repeats<1 || repeats>10)return;
+              const QImage img=Ug79V7Capture();
+              if(img.width()<640 || img.height()<360)
+              {if(ug79_v8_status)ug79_v8_status->setText(
+                  QStringLiteral("No sufficiently large video frame. Nothing sent."));return;}
+              const QString path=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG");
+              QFile test(path);
+              if(path.isEmpty() || !test.open(QIODevice::Append|QIODevice::WriteOnly|QIODevice::Text))
+              {if(ug79_v8_status)ug79_v8_status->setText(
+                  QStringLiteral("Cannot write v8 log; check folder permissions. Nothing sent."));return;}
+              test.write("WALL_V8_LOG_WRITE_OK\n");
+              test.close();
+              ug79_v8_reopen=reopen;
+              ug79_v8_cross=cross;
+              ug79_v8_repeats=repeats;
+              ug79_v8_completed=0;
+              ug79_v8_trial_ms=0;
+              ug79_v8_cells.clear();
+              ug79_v8_session=QString::number(QDateTime::currentMSecsSinceEpoch());
+              ug79_v8_running=true;
+              ug79_v8_stage=1;
+              Ug79V8Log(QStringLiteral("START; user must be Y~260, clear sky, creative cheats; world +Z"));
+              Ug79V8Send(QStringList{QStringLiteral("/tp @s ~ ~ ~ 0 0")},850,620,
+                         QStringLiteral("ALIGN_POSITIVE_Z"));
+          }
+
+          // Infer the projected grid from the difference between calibrated empty sky
+          // and known filled pattern. Refuse unexpected 8 x 4 geometry (fail closed).
+          bool StreamSession::Ug79V8Learn()
+          {
+              if(ug79_v8_full.isNull() || ug79_v8_empty.isNull() ||
+                 ug79_v8_full.size()!=ug79_v8_empty.size())return false;
+              const int w=ug79_v8_full.width(),h=ug79_v8_full.height();
+              const int xl=w*17/100,xr=w*83/100,yt=h*25/100,yb=h*76/100;
+              QVector<int> hx(w,0),hy(h,0);
+              for(int y=yt;y<yb;y+=2)
+                  for(int x=xl;x<xr;x+=2)
+                  {
+                      const QColor a(ug79_v8_full.pixel(x,y));
+                      const QColor b(ug79_v8_empty.pixel(x,y));
+                      const int delta=qAbs(a.red()-b.red())+
+                          qAbs(a.green()-b.green())+qAbs(a.blue()-b.blue());
+                      if(delta>=110){++hx[x];++hy[y];}
+                  }
+              // Histograms use even pixel samples only; small holes tolerated.
+              auto groups=[](const QVector<int> &v,int lo,int hi,int threshold,int minimumWidth){
+                  QVector<QPair<int,int>> out;
+                  int start=-1,last=-1;
+                  for(int p=lo;p<hi;p+=2)
+                  {
+                      const bool present=v[p]>=threshold;
+                      if(present)
+                      {if(start<0)start=p;last=p;}
+                      else if(start>=0 && p-last>6)
+                      {if(last-start+2>=minimumWidth)out.append(qMakePair(start,last+1));
+                       start=last=-1;}
+                  }
+                  if(start>=0 && last-start+2>=minimumWidth)
+                      out.append(qMakePair(start,last+1));
+                  return out;
+              };
+              const auto xs=groups(hx,xl,xr,6,5);
+              const auto ys=groups(hy,yt,yb,8,5);
+              Ug79V8Log(QStringLiteral("CALIBRATION_GEOMETRY columns=%1 rows=%2 size=%3x%4")
+                  .arg(xs.size()).arg(ys.size()).arg(w).arg(h));
+              if(xs.size()!=8 || ys.size()!=4)return false;
+              ug79_v8_cells.clear();
+              for(int row=0;row<4;++row)
+                  for(int col=0;col<8;++col)
+                  {
+                      const auto xx=xs[col],yy=ys[row];
+                      // Inset to avoid antialiasing and block-edge shadows.
+                      const int dx=qMax(1,(xx.second-xx.first)/5);
+                      const int dy=qMax(1,(yy.second-yy.first)/5);
+                      const QRect r(xx.first+dx,yy.first+dy,
+                          xx.second-xx.first-2*dx,yy.second-yy.first-2*dy);
+                      if(r.width()<3 || r.height()<3)return false;
+                      ug79_v8_cells.append(r);
+                      qint64 difference=0,points=0;
+                      for(int y=r.top();y<=r.bottom();y+=2)
+                          for(int x=r.left();x<=r.right();x+=2)
+                          {
+                              const QColor a(ug79_v8_full.pixel(x,y));
+                              const QColor b(ug79_v8_empty.pixel(x,y));
+                              difference+=qAbs(a.red()-b.red())+
+                                  qAbs(a.green()-b.green())+qAbs(a.blue()-b.blue());
+                              ++points;
+                          }
+                      if(points<6 || difference/points<100)
+                      {Ug79V8Log(QStringLiteral("CALIBRATION_WEAK_CELL slot=%1 delta=%2")
+                          .arg(row*8+col+1).arg(points?difference/points:0));return false;}
+                  }
+              return ug79_v8_cells.size()==32;
+          }
+
+          bool StreamSession::Ug79V8EmptyVerified() const
+          {
+              const QImage img=Ug79V7Capture();
+              if(img.size()!=ug79_v8_empty.size() || ug79_v8_cells.size()!=32)return false;
+              for(const QRect &r:ug79_v8_cells)
+              {
+                  qint64 error=0,n=0;
+                  for(int y=r.top();y<=r.bottom();y+=2)
+                      for(int x=r.left();x<=r.right();x+=2)
+                      {
+                          const QColor a(img.pixel(x,y)),b(ug79_v8_empty.pixel(x,y));
+                          error+=qAbs(a.red()-b.red())+qAbs(a.green()-b.green())+
+                              qAbs(a.blue()-b.blue());++n;
+                      }
+                  if(!n || error/n>75)return false;
+              }
+              return true;
+          }
+
+          void StreamSession::Ug79V8Score()
+          {
+              if(!ug79_v8_running || ug79_v8_stage!=5)return;
+              const QImage img=Ug79V7Capture();
+              if(img.isNull() || img.size()!=ug79_v8_full.size())
+              {Ug79V8Report(QStringLiteral("VISUAL_UNAVAILABLE"),0,0,32,
+                  QStringLiteral("video lost/resized"));
+               Ug79V8Stop(QStringLiteral("video unavailable during test scoring"));return;}
+              int correct=0,missing=0,uncertain=0;
+              QStringList wrong,unknown;
+              const QString base=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG");
+              QFile details(base+QStringLiteral(".wall-blocks.csv"));
+              if(details.open(QIODevice::Append|QIODevice::WriteOnly|QIODevice::Text) && details.size()==0)
+                  details.write("utc,session,trial,command,classification,full_error,empty_error\n");
+              for(int i=0;i<ug79_v8_cells.size();++i)
+              {
+                  const QRect r=ug79_v8_cells[i];
+                  qint64 ef=0,ee=0,n=0;
+                  for(int y=r.top();y<=r.bottom();y+=2)
+                      for(int x=r.left();x<=r.right();x+=2)
+                      {
+                          const QColor a(img.pixel(x,y));
+                          const QColor f(ug79_v8_full.pixel(x,y));
+                          const QColor e(ug79_v8_empty.pixel(x,y));
+                          ef+=qAbs(a.red()-f.red())+qAbs(a.green()-f.green())+
+                              qAbs(a.blue()-f.blue());
+                          ee+=qAbs(a.red()-e.red())+qAbs(a.green()-e.green())+
+                              qAbs(a.blue()-e.blue());++n;
+                      }
+                  const int ferr=n?int(ef/n):9999, eerr=n?int(ee/n):9999;
+                  QString verdict;
+                  if(ferr<85 && ferr+50<eerr){++correct;verdict=QStringLiteral("CORRECT");}
+                  else if(eerr<85 && eerr+50<ferr)
+                  {++missing;wrong << QString::number(i+1);verdict=QStringLiteral("MISSING");}
+                  else{++uncertain;unknown << QString::number(i+1);verdict=QStringLiteral("UNCERTAIN");}
+                  if(details.isOpen())
+                      details.write(QStringLiteral("%1,%2,%3,%4,%5,%6,%7\n")
+                          .arg(QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs))
+                          .arg(ug79_v8_session).arg(ug79_v8_completed+1).arg(i+1)
+                          .arg(verdict).arg(ferr).arg(eerr).toUtf8());
+              }
+              const QString outcome=uncertain?QStringLiteral("VISUAL_UNCERTAIN"):
+                  (missing?QStringLiteral("MISSING_BLOCKS"):QStringLiteral("PASS"));
+              const QString reason=QStringLiteral("missing=[%1] uncertain=[%2]")
+                  .arg(wrong.join(QStringLiteral("|")),unknown.join(QStringLiteral("|")));
+              Ug79V8Report(outcome,correct,missing,uncertain,reason);
+              if(correct!=32 || uncertain)
+                  img.save(base+QStringLiteral(".wall-last-failure.png"),"PNG");
+              Ug79V8Log(QStringLiteral("TRIAL_RESULT %1 correct=%2 missing=%3 uncertain=%4 ms=%5 %6")
+                  .arg(outcome).arg(correct).arg(missing).arg(uncertain)
+                  .arg(ug79_v8_trial_ms).arg(reason));
+              ++ug79_v8_completed;
+              if(ug79_v8_status)
+                  ug79_v8_status->setText(QStringLiteral("Trial %1/%2: %3 of 32 blocks correct; %4 missing, %5 uncertain; "
+                      "%6 correct commands/min. Resetting wall...")
+                      .arg(ug79_v8_completed).arg(ug79_v8_repeats).arg(correct)
+                      .arg(missing).arg(uncertain)
+                      .arg(ug79_v8_trial_ms>0 ? 60000.0*correct/ug79_v8_trial_ms : 0.0,0,'f',2));
+              ug79_v8_stage=6;
+              QTimer::singleShot(550,this,[this](){
+                  Ug79V8Send(QStringList{QStringLiteral("/fill ~-7 ~-1 ~20 ~7 ~5 ~20 air")},
+                      850,620,QStringLiteral("RESET_AFTER_TRIAL"));
+              });
+          }
+
+          void StreamSession::Ug79V8OnBatchStop(const QString &reason)
+          {
+              if(!ug79_v8_running)return;
+              const int phase=ug79_v8_stage;
+              // The existing native state machine has already stopped and released buttons.
+              if(!reason.startsWith(QStringLiteral("Queue complete:")))
+              {
+                  if(phase==5)
+                  {
+                      ug79_v8_trial_ms=ug79_v4_clock.elapsed();
+                      Ug79V8Report(QStringLiteral("PROTOCOL_FAIL"),0,0,32,
+                          QStringLiteral("failed at command %1: %2; not scored")
+                          .arg(ug79_batch_index+1).arg(reason));
+                  }
+                  Ug79V8Stop(QStringLiteral("protocol failure: ")+reason+
+                      QStringLiteral(". Manually restore normal gameplay before retrying."));
+                  return;
+              }
+              if(phase==5)ug79_v8_trial_ms=ug79_v4_clock.elapsed();
+              Ug79V8Log(QStringLiteral("BATCH_COMPLETE phase=%1 count=%2 ms=%3")
+                  .arg(phase).arg(ug79_batch_index).arg(ug79_v4_clock.elapsed()));
+              const int settle=(phase==3||phase==5)?3400:2000;
+              QTimer::singleShot(settle,this,[this,phase](){
+                  if(!ug79_v8_running || ug79_v8_stage!=phase || !connected)return;
+                  const QString clear=QStringLiteral("/fill ~-7 ~-1 ~20 ~7 ~5 ~20 air");
+                  if(phase==1)
+                  {
+                      ug79_v8_stage=2;
+                      Ug79V8Send(QStringList{clear},850,620,QStringLiteral("CLEAR_BEFORE_CAL"));
+                  }
+                  else if(phase==2)
+                  {
+                      ug79_v8_empty=Ug79V7Capture();
+                      if(ug79_v8_empty.width()<640 || ug79_v8_empty.height()<360)
+                      {Ug79V8Stop(QStringLiteral("blank reference capture failed"));return;}
+                      const QString path=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG");
+                      ug79_v8_empty.save(path+QStringLiteral(".wall-empty.png"),"PNG");
+                      ug79_v8_stage=3;
+                      Ug79V8Send(Ug79V8WallCommands(),850,620,QStringLiteral("CALIBRATION_32"));
+                  }
+                  else if(phase==3)
+                  {
+                      ug79_v8_full=Ug79V7Capture();
+                      const QString path=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG");
+                      ug79_v8_full.save(path+QStringLiteral(".wall-filled.png"),"PNG");
+                      if(!Ug79V8Learn())
+                      {Ug79V8Stop(QStringLiteral("32-block calibration wasn't visually unambiguous. "
+                          "Check saved full/empty screenshots. No speed test sent."));return;}
+                      Ug79V8Log(QStringLiteral("CALIBRATION_PASS 32 distinct visible block positions"));
+                      ug79_v8_stage=4;
+                      Ug79V8Send(QStringList{clear},850,620,QStringLiteral("CLEAR_AFTER_CAL"));
+                  }
+                  else if(phase==4 || phase==6)
+                  {
+                      if(!Ug79V8EmptyVerified())
+                      {Ug79V8Stop(QStringLiteral("reset didn't restore the calibrated empty view"));return;}
+                      if(ug79_v8_completed>=ug79_v8_repeats)
+                      {Ug79V8Stop(QStringLiteral("COMPLETE: %1 trials; analyse wall-results.csv")
+                          .arg(ug79_v8_completed));return;}
+                      ug79_v8_stage=5;
+                      Ug79V8Send(Ug79V8WallCommands(),ug79_v8_reopen,
+                          ug79_v8_cross,QStringLiteral("TIMED_TRIAL_%1").arg(ug79_v8_completed+1));
+                  }
+                  else if(phase==5) Ug79V8Score();
+              });
+          }
+
+          void StreamSession::Ug79V8ShowPanel(QDialog *dialog,QVBoxLayout *layout)
+          {
+              dialog->setWindowTitle(QStringLiteral("Chiaki v8 - Visual Wall Speed Tester"));
+              for(QWidget *old:dialog->findChildren<QWidget*>())old->hide();
+              auto *info=new QLabel(QStringLiteral(
+                  "TEST WORLD ONLY, Creative + cheats. Stand at Y about 260 with empty sky. "
+                  "This test rotates view to +Z using /tp @s ~ ~ ~ 0 0 (position unchanged). "
+                  "Do not move or rotate after starting. Wall at Z+20, X -7..+7, Y -1..+5. "
+                  "Calibration builds a 32-block 8x4 reference at 850/620ms, captures it, "
+                  "clears it and verifies empty sky. Timed batches build those same 32 "
+                  "positions. Reset is NOT timed. Only run in a disposable area. "
+                  "No auto-retry if keyboard state becomes unknown."),dialog);
+              info->setWordWrap(true);
+              layout->addWidget(info);
+              auto *r=new QSpinBox(dialog);
+              r->setRange(150,1500);r->setSingleStep(1);r->setValue(400);
+              auto *c=new QSpinBox(dialog);
+              c->setRange(200,1500);c->setSingleStep(1);c->setValue(400);
+              auto *n=new QSpinBox(dialog);
+              n->setRange(1,10);n->setValue(3);
+              auto *row=new QHBoxLayout();
+              row->addWidget(new QLabel(QStringLiteral("Reopen ms"),dialog));row->addWidget(r);
+              row->addWidget(new QLabel(QStringLiteral("Right-to-Cross ms"),dialog));row->addWidget(c);
+              row->addWidget(new QLabel(QStringLiteral("Repeat batches"),dialog));row->addWidget(n);
+              layout->addLayout(row);
+              auto *start=new QPushButton(QStringLiteral("CALIBRATE WALL + RUN TIMED BATCHES"),dialog);
+              auto *stop=new QPushButton(QStringLiteral("STOP v8"),dialog);
+              layout->addWidget(start);layout->addWidget(stop);
+              auto *status=new QLabel(QStringLiteral("Idle. Start from normal gameplay, chat/PS keyboard closed. "
+                  "Keep video unobscured at 640x360 or higher. Log: ")+
+                  qEnvironmentVariable("CHIAKI_KB_DIAG_LOG"),dialog);
+              status->setWordWrap(true);
+              ug79_v8_status=status;
+              layout->addWidget(status);
+              QObject::connect(start,&QPushButton::clicked,dialog,[this,r,c,n](){
+                  Ug79V8Start(r->value(),c->value(),n->value());
+              });
+              QObject::connect(stop,&QPushButton::clicked,dialog,[this](){
+                  Ug79V8Stop(QStringLiteral("user pressed STOP"));
+              });
+              QObject::connect(dialog,&QObject::destroyed,this,[this](){
+                  ug79_v8_status=nullptr;
+                  Ug79V8Stop(QStringLiteral("v8 test panel closed"));
+              });
+          }
+
+          '''
+          c=one(c,'void StreamSession::Ug79BatchStop(const QString &reason)',
+                methods+'void StreamSession::Ug79BatchStop(const QString &reason)',
+                'insert standalone wall verifier methods')
+          c=one(c,'ug79KbV2Log("KB_V3_BATCH_STOPPED");',
+          '''ug79KbV2Log("KB_V3_BATCH_STOPPED");
+              if(ug79_v8_running)
+                  Ug79V8OnBatchStop(reason);''','receive existing queue completion/failure')
+          c=one(c,'ug79KbV2Log("KB_V4_FULLCYCLE_PANEL_SHOWN");',
+          '''if(qEnvironmentVariable("CHIAKI_KB_WALL_VERIFY")==QStringLiteral("1"))
+                  Ug79V8ShowPanel(dialog,layout);
+              ug79KbV2Log("KB_V4_FULLCYCLE_PANEL_SHOWN");''', 'separate v8 setup panel')
+          # Exactly two timer sites in the known v7.3 program: reopen + Cross.
+          old='qEnvironmentVariable("CHIAKI_KB_AUTO_VERIFY")==QStringLiteral("1") ? '
+          new='(qEnvironmentVariable("CHIAKI_KB_AUTO_VERIFY")==QStringLiteral("1") || qEnvironmentVariable("CHIAKI_KB_WALL_VERIFY")==QStringLiteral("1")) ? '
+          if c.count(old)!=2:
+              raise RuntimeError(f'WALL V8 precise timers: expected 2 sites; got {c.count(old)}')
+          c=c.replace(old,new)
+          hpath.write_text(h,encoding='utf-8')
+          cpath.write_text(c,encoding='utf-8')
+          print('WALL V8 injected as separate opt-in panel using intact v3-v7.3 backends.')
+          PY_V8
+
       - name: Build libplacebo
         run: |
           scripts/build-libplacebo-windows.sh
@@ -2340,7 +2806,7 @@ jobs:
         run: |
           printf '@echo off\r\nset "VK_LOADER_DRIVERS_DISABLE=*dzn*"\r\nstart "" "%%~dp0chiaki.exe"\r\n' > chiaki-ng-Win/Launch-UG79.cmd
 
-      - name: Add current v7.3 verifier launcher only
+      - name: Add only visual wall v8 launcher
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -2351,34 +2817,71 @@ jobs:
               'cd /d "%~dp0"',
               'set "VK_LOADER_DRIVERS_DISABLE=*dzn*"',
               'set "CHIAKI_KB_PROBE=both"',
-              'set "CHIAKI_KB_DIAG_LOG=%~dp0KBPROBE-Bedrock-AutoVerify-v7-3.log"',
+              'set "CHIAKI_KB_DIAG_LOG=%~dp0KBPROBE-Bedrock-Wall-v8.log"',
               'set "CHIAKI_KB_BATCH=1"',
               'set "CHIAKI_KB_FULLCYCLE=1"',
               'set "CHIAKI_KB_SPEED_PROFILES=1"',
               'set "CHIAKI_KB_BUILD_TEST=0"',
-              'set "CHIAKI_KB_AUTO_VERIFY=1"',
+              'set "CHIAKI_KB_AUTO_VERIFY=0"',
+              'set "CHIAKI_KB_WALL_VERIFY=1"',
               'start "" "%~dp0chiaki.exe"',
           ]
-          (folder / 'TEST-Bedrock-AutoVerify-v7-3.cmd').write_bytes(
+          (folder / 'TEST-Bedrock-Wall-v8.cmd').write_bytes(
               ('\r\n'.join(commands) + '\r\n').encode('utf-8'))
-          print('Created only the current v7.3 verification launcher.')
+          print('Created only the v8 wall calibration launcher.')
           PY
 
-      - name: Add V7.3 unattended test instructions
+      - name: Add V8 visual wall instructions
         run: |
           python - <<'PY'
           from pathlib import Path
-          Path('chiaki-ng-Win/README-V7-3-AUTO-TEST.txt').write_text("CHIAKI V7.3 - RESILIENT BEDROCK AUTO SPEED VERIFIER (EXPERIMENTAL)\n\nDO NOT USE ON AN IMPORTANT WORLD. Creative + cheats, disposable backed-up test world.\nNo video, tokens, telemetry or screenshots are uploaded by the verifier.\nThe existing working v6 remains unchanged on its preserved branch.\n\n1. Extract the new artifact into its own directory and close other Chiaki apps.\n2. Run TEST-Bedrock-AutoVerify-v7-3.cmd and connect to PS4 Remote Play.\n3. Open Minecraft Bedrock in Creative and stand still on/near clear ground.\n4. Ensure X +2..+9, Z +2..+5, Y -3 and -2 relative to player are disposable.\n   Coordinates are WORLD axes, not camera direction. Camera must not move.\n5. Keep Chiaki stream visible and unobscured at >=640x360. Place the test\n   panel off to one side, without obscuring the Minecraft video.\n6. Close the game chat/PS keyboard before clicking START v7.3 FULL AUTO TEST.\n7. STOP is always available. Do not leave first live trial unattended.\n\nHow the test works: first calibrates actual red/green/red title images;\nthen tests an 8x11 grid of reopen/cross timings starting at P2 400/620ms.\nEach trial rebuilds 32 blocks and verifies Bedrock /execute if blocks.\nFailure is logged and, for protocol failures, up to 3 bounded Circle-cancel\nrecovery attempts require the video to resemble the initial gameplay.\nOnly recovered known gameplay permits the next trial; no failed command is\nblindly resent. An unrecoverable state stops the engine safely; remaining\nuntested settings are not presented as passes.\n\nFollowing the coarse scan, two 31-point searches around the fastest\nobserved success vary one parameter in 1ms increments at a time.\nFinally the 3 fastest distinct successes are repeated (24/12/12 trials).\nONE successful test is never evidence of absolute reliability; even dozens\nof successful trials cannot prove a 100% error-free rate.\nActual elapsed times and event timestamps matter more than QTimer's requested\nmillisecond delay (Windows scheduler/network jitter may blur 1ms changes).\n\nResults: KBPROBE-Bedrock-AutoVerify-v7-3.log and append-only\nKBPROBE-Bedrock-AutoVerify-v7-3.log.v7-3-results.csv\nCSV outcomes: PASS, GAME_FAIL, PROTOCOL_FAIL, VISUAL_INCONCLUSIVE,\nVISUAL_FAIL and UNSAFE_STOP. ALL FAILURES STAY IN THE RECORD.\nV7.3 alternates verified GREEN and CYAN receipts (not unique number OCR).\nRecovery verifies crosshair/hotbar edges and logs exact mismatch reasons.\nWhen game/video state is uncertain, tests stop rather than making unsafe\ncommands. On-screen red Minecraft syntax errors are not yet parsed; game-side\nverification is based on verified glyphs from the /execute comparator.\n\nLIMITATIONS: THIS IS NOT YET COMPILED OR PS4-VALIDATED. GitHub build required.\nProof of full-world command execution is not claimed. Test only in disposable\nworld. Do not leave the first test unsupervised until recovery is validated.\n",encoding='utf-8')
+          Path('chiaki-ng-Win/README-V8-WALL.txt').write_text('''CHI AKI V8 - PS4 BEDROCK VISUAL WALL SPEED TESTER
+
+          Experimental; use ONLY in a disposable Creative+cheats Minecraft world.
+          Stand around Y=260, look into empty sky. Be clear of any important builds.
+          The tester sends /tp @s ~ ~ ~ 0 0 to set yaw and pitch 0, without
+          intentionally moving your X/Y/Z location; it faces POSITIVE Z.
+          It modifies blocks at Z+20, X -7..+7, Y -1..+5 relative to your position.
+
+          1. Extract this GitHub Actions artifact to a NEW folder. Close old Chiaki apps.
+          2. Launch TEST-Bedrock-Wall-v8.cmd; connect PS4 Remote Play and Minecraft.
+          3. Keep Chiaki video visible, >=640x360 and unobscured; move the test panel aside.
+          4. Close Minecraft chat / PS4 keyboard. Set reopen & Right-to-Cross delays
+             in milliseconds (1ms increments), and choose 1-10 repeat batches.
+          5. Press CALIBRATE WALL + RUN TIMED BATCHES. Leave player/camera untouched.
+
+          The test aligns view, clears the tiny wall plane, captures empty sky,
+          builds 8x4 colored concrete at safe 850/620 timings, captures reference,
+          requires exactly 8 columns and 4 rows in the reference difference map,
+          clears and validates emptiness, then runs repeated 32-command speed batches.
+          Each trial's timing EXCLUDES all calibration, clearing and visual analysis.
+          For every expected block, it compares video with both filled and empty
+          reference pixels and reports CORRECT, MISSING or UNCERTAIN. Unclear or lost
+          video NEVER counts as a pass. A protocol failure stops the sequence safely;
+          no potentially world-changing command is automatically resent. Test STOP
+          never initiates a blind clean-up command.
+
+          Outputs (beside launcher):
+          KBPROBE-Bedrock-Wall-v8.log
+          KBPROBE-Bedrock-Wall-v8.log.wall-results.csv
+          KBPROBE-Bedrock-Wall-v8.log.wall-blocks.csv
+          KBPROBE-Bedrock-Wall-v8.log.wall-empty.png
+          KBPROBE-Bedrock-Wall-v8.log.wall-filled.png
+          KBPROBE-Bedrock-Wall-v8.log.wall-last-failure.png (on failed visual trials)
+
+          This is a first experimental implementation, not yet compiled or
+          PS4-validated. Keep the first run supervised. Do not use in a valuable world.
+          ''',encoding='utf-8')
           PY
 
       - name: Package portable prototype
         run: |
-          zip -r chiaki-ng-bedrock-auto-verify-v7-3-win64.zip chiaki-ng-Win
+          zip -r chiaki-ng-bedrock-wall-v8-win64.zip chiaki-ng-Win
 
       - name: Upload portable prototype
         uses: actions/upload-artifact@v4
         with:
-          name: chiaki-ng-bedrock-auto-verify-v7-3-win64
-          path: chiaki-ng-bedrock-auto-verify-v7-3-win64.zip
+          name: chiaki-ng-bedrock-wall-v8-win64
+          path: chiaki-ng-bedrock-wall-v8-win64.zip
           if-no-files-found: error
           retention-days: 7
