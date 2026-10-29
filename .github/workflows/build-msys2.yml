@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-windows_x64-msys2:
-    name: Build Windows x64 Bedrock Visual Wall v8
+    name: Build Windows x64 Bedrock Visual Wall v8.1
     runs-on: windows-latest
     defaults:
       run:
@@ -2771,6 +2771,183 @@ jobs:
           print('WALL V8 injected as separate opt-in panel using intact v3-v7.3 backends.')
           PY_V8
 
+      - name: Inject v8.1 bounded Circle-Circle keyboard reopen recovery (temporary checkout)
+        run: |
+          python - <<'PY_V81'
+          from pathlib import Path
+          hpath=Path('gui/include/streamsession.h')
+          cpath=Path('gui/src/streamsession.cpp')
+          h=hpath.read_text(encoding='utf-8')
+          c=cpath.read_text(encoding='utf-8')
+          def one(src,old,new,label):
+              count=src.count(old)
+              if count!=1:
+                  raise RuntimeError(f'V8.1 {label}: expected 1 anchor; found {count}')
+              return src.replace(old,new,1)
+          h=one(h,'bool ug79_v8_running=false;',r'''bool ug79_v8_running=false;
+              bool ug79_v8_recovering=false;
+              int ug79_v8_last_stop_phase=0;
+              int ug79_v8_reopen_attempts=0;
+              int ug79_v8_total_reopen_attempts=0;
+              quint64 ug79_v8_recovery_token=0;''','state declarations')
+          h=one(h,'void Ug79V8OnBatchStop(const QString &reason);',r'''void Ug79V8OnBatchStop(const QString &reason);
+              void Ug79V8RecoverReopen();''','method declaration')
+          c=one(c,'const bool was_active = ug79_batch_active;',r'''if(ug79_v8_running)
+                  ug79_v8_last_stop_phase=ug79_batch_phase;
+              const bool was_active = ug79_batch_active;''','remember phase before native queue is stopped')
+          c=one(c,'const QString command = ug79_batch_commands.at(ug79_batch_index);',r'''if(ug79_v8_running && ug79_v8_reopen_attempts>0)
+              {
+                  Ug79V8Log(QStringLiteral("REOPEN_RECOVERED stage=%1 command=%2 after_attempts=%3")
+                      .arg(ug79_v8_stage).arg(ug79_batch_index+1).arg(ug79_v8_reopen_attempts));
+                  ug79_v8_reopen_attempts=0;
+              }
+              const QString command = ug79_batch_commands.at(ug79_batch_index);''','verified native keyboard open resets retry count')
+          c=one(c,'void StreamSession::Ug79V8OnBatchStop(const QString &reason)',r'''// V8.1: retry only a failed REOPEN (phase 1). Never re-submit text if
+          // keyboard_set_text or accept was already attempted (phases 2-4).
+          // The native queue is inactive here, with its old timers invalidated.
+          void StreamSession::Ug79V8RecoverReopen()
+          {
+              if(!ug79_v8_running || !connected || ug79_batch_active ||
+                 ug79_batch_keyboard_open || ug79_v8_recovering)
+              {
+                  Ug79V8Stop(QStringLiteral("Cannot safely initiate keyboard reopen recovery"));
+                  return;
+              }
+              if(ug79_v8_reopen_attempts>=2 || ug79_v8_total_reopen_attempts>=12)
+              {
+                  Ug79V8Stop(QStringLiteral("Keyboard reopen retry limit reached"));
+                  return;
+              }
+              ++ug79_v8_reopen_attempts;
+              ++ug79_v8_total_reopen_attempts;
+              ug79_v8_recovering=true;
+              const quint64 token=++ug79_v8_recovery_token;
+              const int command=ug79_batch_index+1;
+              Ug79V8Log(QStringLiteral("REOPEN_FAILURE stage=%1 command=%2 attempt=%3/2 total=%4 action=CIRCLE,CIRCLE,DPAD_RIGHT,CROSS")
+                  .arg(ug79_v8_stage).arg(command).arg(ug79_v8_reopen_attempts)
+                  .arg(ug79_v8_total_reopen_attempts));
+              const QString path=qEnvironmentVariable("CHIAKI_KB_DIAG_LOG");
+              if(!path.isEmpty())
+              {
+                  QFile f(path+QStringLiteral(".wall-recovery.csv"));
+                  if(f.open(QIODevice::Append|QIODevice::WriteOnly|QIODevice::Text))
+                  {
+                      if(f.size()==0)
+                          f.write("utc,session,stage,trial,command,retry_attempt,total_attempts,event\n");
+                      f.write(QStringLiteral("%1,%2,%3,%4,%5,%6,%7,REOPEN_TIMEOUT\n")
+                          .arg(QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs))
+                          .arg(ug79_v8_session).arg(ug79_v8_stage).arg(ug79_v8_completed+1)
+                          .arg(command).arg(ug79_v8_reopen_attempts)
+                          .arg(ug79_v8_total_reopen_attempts).toUtf8());
+                  }
+              }
+              if(ug79_v8_status)
+                  ug79_v8_status->setText(QStringLiteral("Keyboard reopening failed at command %1. Recovery %2/2: Circle twice, then Right + Cross.")
+                      .arg(command).arg(ug79_v8_reopen_attempts));
+              // Check that the test is still running before every new pulse;
+              // release each press unconditionally if still connected.
+              QTimer::singleShot(300,this,[this,token]() {
+                  if(!ug79_v8_running || !ug79_v8_recovering ||
+                     ug79_v8_recovery_token!=token || !connected)return;
+                  chiaki_controller_state_set_idle(&ug79_automation_state);
+                  ug79_automation_state.buttons=CHIAKI_CONTROLLER_BUTTON_MOON; // PS Circle
+                  SendFeedbackState();
+                  Ug79V8Log(QStringLiteral("RECOVERY_CIRCLE_1_DOWN"));
+                  QTimer::singleShot(170,this,[this,token]() {
+                      chiaki_controller_state_set_idle(&ug79_automation_state);
+                      if(connected)SendFeedbackState();
+                      if(!ug79_v8_running || !ug79_v8_recovering ||
+                         ug79_v8_recovery_token!=token || !connected)return;
+                      Ug79V8Log(QStringLiteral("RECOVERY_CIRCLE_1_UP"));
+                      QTimer::singleShot(350,this,[this,token]() {
+                          if(!ug79_v8_running || !ug79_v8_recovering ||
+                             ug79_v8_recovery_token!=token || !connected)return;
+                          ug79_automation_state.buttons=CHIAKI_CONTROLLER_BUTTON_MOON;
+                          SendFeedbackState();
+                          Ug79V8Log(QStringLiteral("RECOVERY_CIRCLE_2_DOWN"));
+                          QTimer::singleShot(170,this,[this,token]() {
+                              chiaki_controller_state_set_idle(&ug79_automation_state);
+                              if(connected)SendFeedbackState();
+                              if(!ug79_v8_running || !ug79_v8_recovering ||
+                                 ug79_v8_recovery_token!=token || !connected)return;
+                              Ug79V8Log(QStringLiteral("RECOVERY_CIRCLE_2_UP"));
+                              QTimer::singleShot(500,this,[this,token]() {
+                                  if(!ug79_v8_running || !ug79_v8_recovering ||
+                                     ug79_v8_recovery_token!=token || !connected)return;
+                                  if(ug79_batch_keyboard_open || ug79_batch_active)
+                                  {
+                                      Ug79V8Stop(QStringLiteral("Unexpected keyboard/queue state during recovery"));
+                                      return;
+                                  }
+                                  // Preserve the existing command list and index.
+                                  // Re-enter phase 5, then use the existing verified
+                                  // Right-Cross native keyboard opener (same timings).
+                                  ug79_v8_recovering=false;
+                                  ug79_batch_active=true;
+                                  Ug79BatchSetPhase(5,0);
+                                  Ug79V8Log(QStringLiteral("RECOVERY_REOPEN_SEND stage=%1 command=%2 attempt=%3")
+                                      .arg(ug79_v8_stage).arg(ug79_batch_index+1)
+                                      .arg(ug79_v8_reopen_attempts));
+                                  Ug79BatchReopen();
+                              });
+                          });
+                      });
+                  });
+              });
+          }
+
+          void StreamSession::Ug79V8OnBatchStop(const QString &reason)''','insert recovery sequence before batch stop hook')
+          c=one(c,r'''void StreamSession::Ug79V8OnBatchStop(const QString &reason)
+          {
+              if(!ug79_v8_running)return;
+              const int phase=ug79_v8_stage;''',r'''void StreamSession::Ug79V8OnBatchStop(const QString &reason)
+          {
+              if(!ug79_v8_running)return;
+              const int phase=ug79_v8_stage;
+              // A phase-1 timeout means the queued command was NEVER sent;
+              // retry only the keyboard-opening action, preserving its index.
+              const bool reopen_timeout=ug79_v8_last_stop_phase==1 &&
+                  reason.contains(QStringLiteral("PS4 keyboard response timed out"));
+              if(reopen_timeout && connected && !ug79_batch_keyboard_open &&
+                 ug79_v8_reopen_attempts<2 && ug79_v8_total_reopen_attempts<12)
+              {
+                  Ug79V8RecoverReopen();
+                  return;
+              }
+              if(reopen_timeout)
+                  Ug79V8Log(QStringLiteral("REOPEN_EXHAUSTED stage=%1 command=%2 failures=%3 total=%4")
+                      .arg(phase).arg(ug79_batch_index+1)
+                      .arg(ug79_v8_reopen_attempts).arg(ug79_v8_total_reopen_attempts));''','intercept only keyboard open timeout')
+          c=one(c,r'''void StreamSession::Ug79V8Stop(const QString &reason)
+          {
+              if(!ug79_v8_running)return;
+              ug79_v8_running=false;''',r'''void StreamSession::Ug79V8Stop(const QString &reason)
+          {
+              if(!ug79_v8_running)return;
+              ug79_v8_running=false;
+              ug79_v8_recovering=false;
+              ++ug79_v8_recovery_token;
+              chiaki_controller_state_set_idle(&ug79_automation_state);
+              if(connected)SendFeedbackState();''','stop cancels all pending recovery presses')
+          c=one(c,r'''ug79_v8_completed=0;
+              ug79_v8_trial_ms=0;''',r'''ug79_v8_completed=0;
+              ug79_v8_trial_ms=0;
+              ug79_v8_reopen_attempts=0;
+              ug79_v8_total_reopen_attempts=0;
+              ug79_v8_recovering=false;
+              ++ug79_v8_recovery_token;''','reset counters for new test')
+          c=one(c,r'''ug79_batch_commands=commands;
+              ug79_batch_index=0;''',r'''ug79_batch_commands=commands;
+              ug79_batch_index=0;
+              ug79_v8_reopen_attempts=0;''','reset consecutive failures for next batch')
+          c=one(c,'No auto-retry if keyboard state becomes unknown.',
+              'On reopen timeout, attempt Circle twice, then Right + Cross up to two times. Never repeat a submitted world-changing command.',
+              'update panel recovery explanation')
+          hpath.write_text(h,encoding='utf-8')
+          cpath.write_text(c,encoding='utf-8')
+          print('V8.1 keyboard recovery installed: phase-1 only, 2 retry limit per command, 12 per session; no submitted command resent.')
+          PY_V81
+
       - name: Build libplacebo
         run: |
           scripts/build-libplacebo-windows.sh
@@ -2806,7 +2983,7 @@ jobs:
         run: |
           printf '@echo off\r\nset "VK_LOADER_DRIVERS_DISABLE=*dzn*"\r\nstart "" "%%~dp0chiaki.exe"\r\n' > chiaki-ng-Win/Launch-UG79.cmd
 
-      - name: Add only visual wall v8 launcher
+      - name: Add only visual wall v8.1 launcher
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -2817,7 +2994,7 @@ jobs:
               'cd /d "%~dp0"',
               'set "VK_LOADER_DRIVERS_DISABLE=*dzn*"',
               'set "CHIAKI_KB_PROBE=both"',
-              'set "CHIAKI_KB_DIAG_LOG=%~dp0KBPROBE-Bedrock-Wall-v8.log"',
+              'set "CHIAKI_KB_DIAG_LOG=%~dp0KBPROBE-Bedrock-Wall-v8-1.log"',
               'set "CHIAKI_KB_BATCH=1"',
               'set "CHIAKI_KB_FULLCYCLE=1"',
               'set "CHIAKI_KB_SPEED_PROFILES=1"',
@@ -2826,16 +3003,16 @@ jobs:
               'set "CHIAKI_KB_WALL_VERIFY=1"',
               'start "" "%~dp0chiaki.exe"',
           ]
-          (folder / 'TEST-Bedrock-Wall-v8.cmd').write_bytes(
+          (folder / 'TEST-Bedrock-Wall-v8-1.cmd').write_bytes(
               ('\r\n'.join(commands) + '\r\n').encode('utf-8'))
           print('Created only the v8 wall calibration launcher.')
           PY
 
-      - name: Add V8 visual wall instructions
+      - name: Add V8.1 visual wall instructions
         run: |
           python - <<'PY'
           from pathlib import Path
-          Path('chiaki-ng-Win/README-V8-WALL.txt').write_text('''CHI AKI V8 - PS4 BEDROCK VISUAL WALL SPEED TESTER
+          Path('chiaki-ng-Win/README-V8-1-WALL.txt').write_text('''CHIAKI V8.1 - PS4 BEDROCK VISUAL WALL SPEED TESTER
 
           Experimental; use ONLY in a disposable Creative+cheats Minecraft world.
           Stand around Y=260, look into empty sky. Be clear of any important builds.
@@ -2844,7 +3021,7 @@ jobs:
           It modifies blocks at Z+20, X -7..+7, Y -1..+5 relative to your position.
 
           1. Extract this GitHub Actions artifact to a NEW folder. Close old Chiaki apps.
-          2. Launch TEST-Bedrock-Wall-v8.cmd; connect PS4 Remote Play and Minecraft.
+          2. Launch TEST-Bedrock-Wall-v8-1.cmd; connect PS4 Remote Play and Minecraft.
           3. Keep Chiaki video visible, >=640x360 and unobscured; move the test panel aside.
           4. Close Minecraft chat / PS4 keyboard. Set reopen & Right-to-Cross delays
              in milliseconds (1ms increments), and choose 1-10 repeat batches.
@@ -2857,31 +3034,38 @@ jobs:
           Each trial's timing EXCLUDES all calibration, clearing and visual analysis.
           For every expected block, it compares video with both filled and empty
           reference pixels and reports CORRECT, MISSING or UNCERTAIN. Unclear or lost
-          video NEVER counts as a pass. A protocol failure stops the sequence safely;
-          no potentially world-changing command is automatically resent. Test STOP
+          video NEVER counts as a pass. A keyboard REOPEN timeout triggers up to two Circle-Circle-Right-Cross recovery attempts for the current command. Other protocol errors stop safely;
+          no submitted world-changing command is automatically resent. Test STOP
           never initiates a blind clean-up command.
 
           Outputs (beside launcher):
-          KBPROBE-Bedrock-Wall-v8.log
-          KBPROBE-Bedrock-Wall-v8.log.wall-results.csv
-          KBPROBE-Bedrock-Wall-v8.log.wall-blocks.csv
-          KBPROBE-Bedrock-Wall-v8.log.wall-empty.png
-          KBPROBE-Bedrock-Wall-v8.log.wall-filled.png
-          KBPROBE-Bedrock-Wall-v8.log.wall-last-failure.png (on failed visual trials)
+          KBPROBE-Bedrock-Wall-v8-1.log
+          KBPROBE-Bedrock-Wall-v8-1.log.wall-recovery.csv (keyboard reopening failures)
+          KBPROBE-Bedrock-Wall-v8-1.log.wall-results.csv
+          KBPROBE-Bedrock-Wall-v8-1.log.wall-blocks.csv
+          KBPROBE-Bedrock-Wall-v8-1.log.wall-empty.png
+          KBPROBE-Bedrock-Wall-v8-1.log.wall-filled.png
+          KBPROBE-Bedrock-Wall-v8-1.log.wall-last-failure.png (on failed visual trials)
 
-          This is a first experimental implementation, not yet compiled or
+          Recovery is allowed only for a keyboard-opening timeout before text was
+          sent: Circle (170ms), Circle (170ms), then D-pad Right + Cross at the
+          current configured timings. Up to 2 retries per command, max 12 per
+          session; no submitted command is replayed. Recovery time is included
+          in timed trial throughput. Other failures stop rather than resend.
+
+          This is an experimental recovery build, not yet compiled or
           PS4-validated. Keep the first run supervised. Do not use in a valuable world.
           ''',encoding='utf-8')
           PY
 
       - name: Package portable prototype
         run: |
-          zip -r chiaki-ng-bedrock-wall-v8-win64.zip chiaki-ng-Win
+          zip -r chiaki-ng-bedrock-wall-v8-1-win64.zip chiaki-ng-Win
 
       - name: Upload portable prototype
         uses: actions/upload-artifact@v4
         with:
-          name: chiaki-ng-bedrock-wall-v8-win64
-          path: chiaki-ng-bedrock-wall-v8-win64.zip
+          name: chiaki-ng-bedrock-wall-v8-1-win64
+          path: chiaki-ng-bedrock-wall-v8-1-win64.zip
           if-no-files-found: error
           retention-days: 7
