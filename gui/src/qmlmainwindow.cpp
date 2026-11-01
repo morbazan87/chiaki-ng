@@ -6013,6 +6013,19 @@ void QmlMainWindow::resizeSwapchain()
         return;
 
     const QSize window_size(width() * devicePixelRatio(), height() * devicePixelRatio());
+    // UMCB-T1: Never ask libplacebo to create a Vulkan texture of zero size.
+    // Keep the original renderer/device-lost fallback handling unchanged.
+    if (render_backend == RenderBackend::Vulkan &&
+        (window_size.width() <= 0 || window_size.height() <= 0)) {
+        if (quick_frame)
+            endFrame();
+        qCWarning(chiakiGui) << "[UMCB-T1] Deferring Vulkan resize: invalid window dimensions"
+                            << "requested=" << window_size
+                            << "window=" << size()
+                            << "dpr=" << devicePixelRatio()
+                            << "exposed=" << isExposed();
+        return;
+    }
     const bool swapchain_ready = quick_tex &&
                                  (render_backend != RenderBackend::OpenGL || quick_fbo) &&
                                  (render_backend != RenderBackend::Vulkan || quick_vk_image);
@@ -6025,13 +6038,32 @@ void QmlMainWindow::resizeSwapchain()
         drainDeferredSwaps();
 
     QSize new_swapchain_size = window_size;
+    bool resize_ok = false;
     {
         QMutexLocker locker(&placebo_swapchain_mutex);
-        pl_swapchain_resize(placebo_swapchain, &new_swapchain_size.rwidth(), &new_swapchain_size.rheight());
+        resize_ok = pl_swapchain_resize(placebo_swapchain, &new_swapchain_size.rwidth(), &new_swapchain_size.rheight());
     }
 
     if (quick_frame)
         endFrame();
+
+    if (render_backend == RenderBackend::Vulkan) {
+        if (!resize_ok || new_swapchain_size.width() <= 0 || new_swapchain_size.height() <= 0) {
+            qCWarning(chiakiGui) << "[UMCB-T1] Deferring Vulkan resize: invalid swapchain result"
+                                << "resize_ok=" << resize_ok
+                                << "requested=" << window_size
+                                << "returned=" << new_swapchain_size
+                                << "window=" << size()
+                                << "dpr=" << devicePixelRatio()
+                                << "exposed=" << isExposed();
+            return;
+        }
+        if (new_swapchain_size != window_size) {
+            qCInfo(chiakiGui) << "[UMCB-T1] Vulkan swapchain adjusted dimensions"
+                             << "requested=" << window_size
+                             << "returned=" << new_swapchain_size;
+        }
+    }
 
     if (render_backend == RenderBackend::OpenGL) {
         if (!makeOpenGLContextCurrent()) {
