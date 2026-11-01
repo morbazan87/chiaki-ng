@@ -26,6 +26,8 @@ set(SOURCE_FILES
 	src/discoverymanager.cpp
 	include/streamsession.h
 	src/streamsession.cpp
+	include/umcbvideorecorder.h
+	src/umcbvideorecorder.cpp
 	include/sessionlog.h
 	src/sessionlog.cpp
 	include/settings.h
@@ -98,7 +100,7 @@ add_library(placebo-libav-impl src/libav_impl.c)
 target_link_libraries(placebo-libav-impl PkgConfig::LIBPLACEBO FFMPEG::avcodec FFMPEG::avutil FFMPEG::avformat)
 target_link_libraries(chiaki PkgConfig::LIBPLACEBO placebo-libav-impl)
 
-target_link_libraries(chiaki chiaki-lib)
+target_link_libraries(chiaki chiaki-lib FFMPEG::avformat FFMPEG::avcodec FFMPEG::avutil)
 if(CHIAKI_ENABLE_CLI)
 	add_definitions(-DCHIAKI_ENABLE_CLI)
 	target_link_libraries(chiaki chiaki-cli-lib)

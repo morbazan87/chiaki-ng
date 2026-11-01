@@ -39,6 +39,7 @@
 #include <QTimer>
 #include <QQueue>
 #include <QElapsedTimer>
+#include <memory>
 #include <QThread>
 #include <QWaitCondition>
 #include <QAtomicInteger>
@@ -147,6 +148,8 @@ struct MicBuf
 	uint32_t current_byte;
 };
 
+class UMCBVideoRecorder;
+
 class StreamSession : public QObject
 {
 	friend class StreamSessionPrivate;
@@ -244,6 +247,7 @@ class StreamSession : public QObject
 		bool session_started;
 
 		ChiakiFfmpegDecoder *ffmpeg_decoder;
+		std::unique_ptr<UMCBVideoRecorder> umcb_video_recorder;
 		void TriggerFfmpegFrameAvailable();
 #if CHIAKI_LIB_ENABLE_PI_DECODER
 		ChiakiPiDecoder *pi_decoder;
@@ -337,6 +341,11 @@ class StreamSession : public QObject
 
 		void Start();
 		void Stop();
+		Q_INVOKABLE QString startUMCBRecording(int duration_seconds);
+		Q_INVOKABLE void stopUMCBRecording();
+		Q_INVOKABLE bool isUMCBRecording() const;
+		Q_INVOKABLE QString umcbRecordingStatus() const;
+		void feedUMCBVideoSample(const uint8_t *data, size_t size);
 		void GoToBed();
 	Q_INVOKABLE bool RequestIDR();
 		void ToggleMute();

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
 
 #include <streamsession.h>
+#include <umcbvideorecorder.h>
 #include <settings.h>
 #include <controllermanager.h>
 
@@ -358,6 +359,12 @@ static void SessionSetsuCb(SetsuEvent *event, void *user);
 static void SessionSDeckCb(SDeckEvent *event, void *user);
 #endif
 static void FfmpegFrameCb(ChiakiFfmpegDecoder *decoder, void *user);
+static bool UMCBVideoSampleCb(uint8_t *buf, size_t buf_size, int32_t frames_lost, bool frame_recovered, void *user)
+{
+	auto *s = static_cast<StreamSession *>(user);
+	s->feedUMCBVideoSample(buf, buf_size);
+	return chiaki_ffmpeg_decoder_video_sample_cb(buf, buf_size, frames_lost, frame_recovered, s->GetFfmpegDecoder());
+}
 
 StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObject *parent)
 	: QObject(parent),
@@ -386,6 +393,9 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	rumble_haptics_connected(false),
 	rumble_haptics_on(false)
 {
+	umcb_video_recorder = std::make_unique<UMCBVideoRecorder>(
+		connect_info.video_profile.width, connect_info.video_profile.height,
+		connect_info.video_profile.max_fps);
 	mic_buf.buf = nullptr;
 	connected = false;
 	muted = true;
@@ -582,7 +592,7 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	else
 	{
 #endif
-		chiaki_session_set_video_sample_cb(&session, chiaki_ffmpeg_decoder_video_sample_cb, ffmpeg_decoder);
+		chiaki_session_set_video_sample_cb(&session, UMCBVideoSampleCb, this);
 #if CHIAKI_LIB_ENABLE_PI_DECODER
 	}
 #endif
@@ -814,6 +824,32 @@ void StreamSession::Stop()
 {
 	mic_active.storeRelaxed(false);
 	chiaki_session_stop(&session);
+}
+
+QString StreamSession::startUMCBRecording(int seconds)
+{
+	return umcb_video_recorder->start(seconds);
+}
+
+void StreamSession::stopUMCBRecording()
+{
+	umcb_video_recorder->stop();
+}
+
+bool StreamSession::isUMCBRecording() const
+{
+	return umcb_video_recorder->active();
+}
+
+QString StreamSession::umcbRecordingStatus() const
+{
+	return umcb_video_recorder->status();
+}
+
+void StreamSession::feedUMCBVideoSample(const uint8_t *data, size_t size)
+{
+	if (umcb_video_recorder)
+		umcb_video_recorder->feed(data, size);
 }
 
 void StreamSession::GoToBed()

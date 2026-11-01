@@ -30,6 +30,92 @@ Item {
     property bool sessionStopDialogActive: false
     property bool sessionPinDialogActive: false
 
+    // UMCB M1: controlled, PS4-feed-only recording; no PS4 input is generated.
+    // Keeping controls on the stream view avoids changing the existing video renderer.
+    Rectangle {
+        id: umcbRecordingBar
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.margins: 12
+        z: 300
+        width: 268
+        height: 48
+        radius: 6
+        color: "#BB151515"
+        visible: !!Chiaki.session && Chiaki.session.connected && !view.sessionLoading && !view.sessionError
+        property bool recording: false
+        property string statusText: ""
+        RowLayout {
+            anchors.fill: parent
+            anchors.margins: 4
+            spacing: 4
+            Button {
+                text: "2 min"
+                enabled: !umcbRecordingBar.recording
+                onClicked: {
+                    var result = Chiaki.session.startUMCBRecording(120)
+                    umcbRecordingBar.statusText = result
+                    umcbRecordingBar.recording = !result.startsWith("ERROR:")
+                }
+            }
+            Button {
+                text: "3 min"
+                enabled: !umcbRecordingBar.recording
+                onClicked: {
+                    var result = Chiaki.session.startUMCBRecording(180)
+                    umcbRecordingBar.statusText = result
+                    umcbRecordingBar.recording = !result.startsWith("ERROR:")
+                }
+            }
+            Button {
+                text: "Stop"
+                enabled: umcbRecordingBar.recording
+                onClicked: {
+                    Chiaki.session.stopUMCBRecording()
+                    umcbRecordingBar.recording = false
+                    umcbRecordingBar.statusText = Chiaki.session.umcbRecordingStatus()
+                }
+            }
+        }
+        Timer {
+            interval: 1000
+            repeat: true
+            running: !!Chiaki.session && umcbRecordingBar.recording
+            onTriggered: {
+                if (!Chiaki.session) {
+                    umcbRecordingBar.recording = false
+                } else if (!Chiaki.session.isUMCBRecording()) {
+                    // Auto-stop finalises the MP4 and updates status.
+                    Chiaki.session.stopUMCBRecording()
+                    umcbRecordingBar.recording = false
+                    umcbRecordingBar.statusText = Chiaki.session.umcbRecordingStatus()
+                }
+            }
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+3"
+        context: Qt.ApplicationShortcut
+        enabled: !!Chiaki.session && Chiaki.session.connected
+        onActivated: {
+            if (!Chiaki.session.isUMCBRecording()) {
+                var result = Chiaki.session.startUMCBRecording(180)
+                umcbRecordingBar.statusText = result
+                umcbRecordingBar.recording = !result.startsWith("ERROR:")
+            }
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+S"
+        context: Qt.ApplicationShortcut
+        enabled: !!Chiaki.session && Chiaki.session.connected
+        onActivated: {
+            Chiaki.session.stopUMCBRecording()
+            umcbRecordingBar.recording = false
+            umcbRecordingBar.statusText = Chiaki.session.umcbRecordingStatus()
+        }
+    }
+
     function grabInput(item) {
         Chiaki.window.grabInput();
         restoreFocusItems.push(hostWindow ? hostWindow.activeFocusItem : null);
