@@ -93,7 +93,9 @@ int real_main(int argc, char *argv[])
 	wchar_t wc[cSize];
 	mbstowcs (wc, argv[0], cSize);
 	QString import_path = QFileInfo(QString::fromWCharArray(wc)).dir().absolutePath() + "/qml";
-	qputenv("QML_IMPORT_PATH", import_path.toUtf8());// Ignore the Mesa Dozen (D3D12) Vulkan driver; prefer native GPU Vulkan drivers.
+	qputenv("QML_IMPORT_PATH", import_path.toUtf8());
+	
+	// Ignore the Mesa Dozen (D3D12) Vulkan driver; prefer native GPU Vulkan drivers.
 // Leave an explicitly configured Vulkan loader driver filter unchanged.
 if (!qEnvironmentVariableIsSet("VK_LOADER_DRIVERS_DISABLE"))
     qputenv("VK_LOADER_DRIVERS_DISABLE", "*dzn*");
