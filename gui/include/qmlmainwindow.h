@@ -386,6 +386,10 @@ private:
     QAtomicInteger<int> t2_presentation_minimised = 0;
     QAtomicInteger<int> t2_reset_failure_count = 0;
     QAtomicInteger<quint64> t2_background_video_frames = 0;
+    // UMCB-T3: bounded diagnostics for Vulkan presentation restoration only.
+    QAtomicInteger<quint64> t3_restore_generation = 0;
+    QAtomicInteger<quint64> t3_swapchain_recreate_count = 0;
+    QAtomicInteger<quint64> t3_quick_hold_failures = 0;
     QAtomicInteger<int> vulkan_device_lost = 0;
     QAtomicInteger<int> renderer_cache_flush_pending = 0;
     QAtomicInteger<int> placebo_reset_pending = 0;

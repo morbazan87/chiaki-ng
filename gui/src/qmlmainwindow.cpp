@@ -6259,7 +6259,20 @@ void QmlMainWindow::beginFrame()
             .value = quick_sem_value,
         }
     };
-    pl_vulkan_hold_ex(placebo_vulkan->gpu, &hold_params);
+    // UMCB-T3: A failed hold MUST NOT be followed by waiting on its unsignalled
+    // semaphore, Qt Quick rendering, or releasing an image libplacebo did not hold.
+    const bool t3_hold_ok = pl_vulkan_hold_ex(placebo_vulkan->gpu, &hold_params);
+    if (!t3_hold_ok) {
+        const quint64 failure_no = t3_quick_hold_failures.fetchAndAddRelaxed(1) + 1;
+        if (failure_no <= 12 || failure_no % 60 == 0)
+            qCWarning(chiakiGui) << "[UMCB-T3] Qt Quick image hold failed; skipped unsafe frame"
+                                 << "failure_no=" << failure_no
+                                 << "restore_generation=" << t3_restore_generation.loadAcquire()
+                                 << "swapchain_size=" << swapchain_size
+                                 << "pending_recreate=" << swapchain_recreate_pending.loadAcquire()
+                                 << "deferred_present=" << deferred_present_in_flight.loadAcquire();
+        return;
+    }
     const qint64 quick_hold_after_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
     if (quick_hold_after_us >= quick_hold_begin_us) {
         const qint64 quick_hold_us = quick_hold_after_us - quick_hold_begin_us;
@@ -6611,9 +6624,27 @@ void QmlMainWindow::render()
     }
     const bool swapchain_recreated = swapchain_recreate_pending.fetchAndStoreRelaxed(0) != 0;
     if (swapchain_recreated) {
+        // UMCB-T3: only log the first few recreations and sparse checkpoints.
+        const quint64 recreation_no = t3_swapchain_recreate_count.fetchAndAddRelaxed(1) + 1;
+        const bool trace = recreation_no <= 24 || recreation_no % 100 == 0;
+        if (trace)
+            qCInfo(chiakiGui) << "[UMCB-T3] swapchain recreation begin"
+                             << "recreation_no=" << recreation_no
+                             << "restore_generation=" << t3_restore_generation.loadAcquire()
+                             << "old_swapchain=" << (placebo_swapchain != nullptr)
+                             << "quick_frame=" << quick_frame
+                             << "deferred_pending=" << (deferred_swap_thread && deferred_swap_thread->hasPendingWork())
+                             << "present_in_flight=" << deferred_present_in_flight.loadAcquire()
+                             << "window_size=" << size();
         destroySwapchain();
         createSwapchain();
         resizeSwapchain();
+        if (trace)
+            qCInfo(chiakiGui) << "[UMCB-T3] swapchain recreation end"
+                             << "recreation_no=" << recreation_no
+                             << "new_swapchain=" << (placebo_swapchain != nullptr)
+                             << "swapchain_size=" << swapchain_size
+                             << "quick_frame=" << quick_frame;
     }
 
     auto schedulePostSwapchainRecreateRefresh = [this, swapchain_recreated]() {
@@ -7716,6 +7747,13 @@ bool QmlMainWindow::event(QEvent *event)
                           << "window=" << size()
                           << "background_frames=" << t2_background_video_frames.loadAcquire();
         if (!minimised) {
+            // T3 records each restore and the image-hold failure total so far.
+            const quint64 restoration_no = t3_restore_generation.fetchAndAddRelaxed(1) + 1;
+            qCInfo(chiakiGui) << "[UMCB-T3] Restore requested"
+                             << "restoration_no=" << restoration_no
+                             << "previous_hold_failures=" << t3_quick_hold_failures.loadAcquire()
+                             << "pending_recreate=" << swapchain_recreate_pending.loadAcquire()
+                             << "present_in_flight=" << deferred_present_in_flight.loadAcquire();
             // Recreate on the render thread once the window can be drawn to.
             swapchain_recreate_pending.storeRelease(1);
             if (isExposed() && width() > 0 && height() > 0)
