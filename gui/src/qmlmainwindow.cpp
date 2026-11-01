@@ -3008,6 +3008,15 @@ void QmlMainWindow::presentFrame(ChiakiFfmpegFrame frame, int32_t frames_lost, q
     if (!frame.frame)
         return;
 
+    // Record that decoded frames still arrive when on-screen presentation is suspended.
+    // The existing bounded pending-frame path below remains unchanged.
+    if (render_backend == RenderBackend::Vulkan && t2_presentation_minimised.loadAcquire() != 0) {
+        const quint64 received = t2_background_video_frames.fetchAndAddRelaxed(1) + 1;
+        if (received == 1 || received % 600 == 0)
+            qCInfo(chiakiGui) << "[UMCB-T2] Decoded video frames received while minimised:"
+                              << received;
+    }
+
     if (bypass_frame_queue) {
         {
             QMutexLocker locker(&direct_frame_mutex);
@@ -5341,6 +5350,11 @@ void QmlMainWindow::update()
 {
     Q_ASSERT(QThread::currentThread() == QGuiApplication::instance()->thread());
 
+    // Never dispatch Vulkan window rendering while the native window is minimised.
+    // PS4 receiving, decoding and command transport are independent of this call.
+    if (render_backend == RenderBackend::Vulkan && t2_presentation_minimised.loadAcquire() != 0)
+        return;
+
     {
         QMutexLocker locker(&render_schedule_mutex);
         if (render_scheduled) {
@@ -5370,6 +5384,9 @@ void QmlMainWindow::scheduleUpdate(bool force)
 
 void QmlMainWindow::scheduleUpdate(bool force, UpdateRequestReason reason)
 {
+    // Avoid posting per-frame display work while minimised. Decoding continues.
+    if (render_backend == RenderBackend::Vulkan && t2_presentation_minimised.loadAcquire() != 0)
+        return;
     if (QThread::currentThread() != QGuiApplication::instance()->thread()) {
         QMetaObject::invokeMethod(this, [this, force, reason]() { scheduleUpdate(force, reason); }, Qt::QueuedConnection);
         return;
@@ -6007,6 +6024,9 @@ void QmlMainWindow::resizeSwapchain()
 {
     Q_ASSERT(QThread::currentThread() == render_thread);
 
+    if (render_backend == RenderBackend::Vulkan && t2_presentation_minimised.loadAcquire() != 0)
+        return;
+
     if (!placebo_swapchain)
         createSwapchain();
     if (!placebo_swapchain)
@@ -6150,6 +6170,9 @@ void QmlMainWindow::resizeSwapchain()
 void QmlMainWindow::updateSwapchain()
 {
     Q_ASSERT(QThread::currentThread() == QGuiApplication::instance()->thread());
+
+    if (render_backend == RenderBackend::Vulkan && t2_presentation_minimised.loadAcquire() != 0)
+        return;
     const qint64 update_swapchain_begin_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
 
     quick_item->setSize(size());
@@ -6391,6 +6414,18 @@ void QmlMainWindow::render()
 {
     Q_ASSERT(QThread::currentThread() == render_thread);
     if (vulkan_device_lost.loadAcquire() != 0) {
+        QMutexLocker locker(&render_schedule_mutex);
+        render_scheduled = false;
+        render_pending = false;
+        render_pending_during_cycle.storeRelaxed(0);
+        return;
+    }
+    // Only the render thread updates the non-atomic first-failure timestamp.
+    if (t2_reset_failure_count.fetchAndStoreRelaxed(0) != 0) {
+        swapchain_start_failures.storeRelease(0);
+        swapchain_start_failure_first_us = 0;
+    }
+    if (render_backend == RenderBackend::Vulkan && t2_presentation_minimised.loadAcquire() != 0) {
         QMutexLocker locker(&render_schedule_mutex);
         render_scheduled = false;
         render_pending = false;
@@ -7665,7 +7700,32 @@ bool QmlMainWindow::event(QEvent *event)
     bool ret = QWindow::event(event);
 
     switch (event->type()) {
+    case QEvent::WindowStateChange: {
+        if (render_backend != RenderBackend::Vulkan)
+            break;
+        // QWindow::isExposed() remained true in the failed T1 minimise session.
+        // The window state is a separate signal that must gate presentation.
+        const bool minimised = windowStates().testFlag(Qt::WindowMinimized);
+        const int old_state = t2_presentation_minimised.fetchAndStoreRelaxed(minimised ? 1 : 0);
+        if (old_state == (minimised ? 1 : 0))
+            break;
+        t2_reset_failure_count.storeRelease(1);
+        qCInfo(chiakiGui) << "[UMCB-T2] Vulkan presentation"
+                          << (minimised ? "suspended (window minimised)" : "resuming (window restored)")
+                          << "exposed=" << isExposed()
+                          << "window=" << size()
+                          << "background_frames=" << t2_background_video_frames.loadAcquire();
+        if (!minimised) {
+            // Recreate on the render thread once the window can be drawn to.
+            swapchain_recreate_pending.storeRelease(1);
+            if (isExposed() && width() > 0 && height() > 0)
+                updateSwapchain();
+        }
+        break;
+    }
     case QEvent::Expose:
+        if (render_backend == RenderBackend::Vulkan && t2_presentation_minimised.loadAcquire() != 0)
+            break; // Do not destroy/recreate an unavailable native surface on minimise.
         if (isExposed())
             updateSwapchain();
         else

@@ -382,6 +382,10 @@ private:
     float kept_frame_duration = 0.0f;
     AVFrame *fallback_frame = nullptr;
     QAtomicInteger<int> swapchain_recreate_pending = 0;
+    // UMCB-T2: Window presentation is separate from Remote Play video reception.
+    QAtomicInteger<int> t2_presentation_minimised = 0;
+    QAtomicInteger<int> t2_reset_failure_count = 0;
+    QAtomicInteger<quint64> t2_background_video_frames = 0;
     QAtomicInteger<int> vulkan_device_lost = 0;
     QAtomicInteger<int> renderer_cache_flush_pending = 0;
     QAtomicInteger<int> placebo_reset_pending = 0;
