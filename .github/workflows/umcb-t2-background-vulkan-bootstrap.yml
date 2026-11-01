@@ -1,0 +1,67 @@
+# UMCB-T2: one-time source patch; NOT the Windows build workflow.
+# Create umcb/test-vulkan-background-t2 from immutable T1 source commit 4804c87500912bb44a337f139af93bcdc0af3839.
+# This workflow patches ONLY gui/src/qmlmainwindow.cpp and gui/include/qmlmainwindow.h.
+# It deletes itself when complete. Never commit this on the frozen foundation or M1 branch.
+name: UMCB T2 One-Time Background Vulkan Presentation Setup
+on:
+  push:
+    branches:
+      - umcb/test-vulkan-background-t2
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  apply-once:
+    if: github.ref == 'refs/heads/umcb/test-vulkan-background-t2'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 2
+      - name: Verify exact parent and immutable source blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = '4804c87500912bb44a337f139af93bcdc0af3839' || { echo 'ABORT: test branch not directly based on verified T1 commit'; exit 1; }
+          test "$(git hash-object gui/src/qmlmainwindow.cpp)" = 'b657bad763ea10a4e6bbece2123cb793499f64ae' || { echo 'ABORT: source .cpp differs'; exit 1; }
+          test "$(git hash-object gui/include/qmlmainwindow.h)" = '084f8fba032121d2a24f89f528a4fc64e4036c30' || { echo 'ABORT: source .h differs'; exit 1; }
+          test -f .github/workflows/umcb-t2-background-vulkan-bootstrap.yml
+          test -z "$(git status --porcelain)" || { echo 'ABORT: dirty checkout'; exit 1; }
+      - name: Apply T2 narrow source changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+
+          patches = [('gui/include/qmlmainwindow.h', '    QAtomicInteger<int> swapchain_recreate_pending = 0;\n', '    QAtomicInteger<int> swapchain_recreate_pending = 0;\n    // UMCB-T2: Window presentation is separate from Remote Play video reception.\n    QAtomicInteger<int> t2_presentation_minimised = 0;\n    QAtomicInteger<int> t2_reset_failure_count = 0;\n    QAtomicInteger<quint64> t2_background_video_frames = 0;\n'), ('gui/src/qmlmainwindow.cpp', '    if (!frame.frame)\n        return;\n\n    if (bypass_frame_queue) {', '    if (!frame.frame)\n        return;\n\n    // Record that decoded frames still arrive when on-screen presentation is suspended.\n    // The existing bounded pending-frame path below remains unchanged.\n    if (render_backend == RenderBackend::Vulkan && t2_presentation_minimised.loadAcquire() != 0) {\n        const quint64 received = t2_background_video_frames.fetchAndAddRelaxed(1) + 1;\n        if (received == 1 || received % 600 == 0)\n            qCInfo(chiakiGui) << "[UMCB-T2] Decoded video frames received while minimised:"\n                              << received;\n    }\n\n    if (bypass_frame_queue) {'), ('gui/src/qmlmainwindow.cpp', 'void QmlMainWindow::scheduleUpdate(bool force, UpdateRequestReason reason)\n{\n', 'void QmlMainWindow::scheduleUpdate(bool force, UpdateRequestReason reason)\n{\n    // Avoid posting per-frame display work while minimised. Decoding continues.\n    if (render_backend == RenderBackend::Vulkan && t2_presentation_minimised.loadAcquire() != 0)\n        return;\n'), ('gui/src/qmlmainwindow.cpp', 'void QmlMainWindow::update()\n{\n    Q_ASSERT(QThread::currentThread() == QGuiApplication::instance()->thread());\n', 'void QmlMainWindow::update()\n{\n    Q_ASSERT(QThread::currentThread() == QGuiApplication::instance()->thread());\n\n    // Never dispatch Vulkan window rendering while the native window is minimised.\n    // PS4 receiving, decoding and command transport are independent of this call.\n    if (render_backend == RenderBackend::Vulkan && t2_presentation_minimised.loadAcquire() != 0)\n        return;\n'), ('gui/src/qmlmainwindow.cpp', 'void QmlMainWindow::resizeSwapchain()\n{\n    Q_ASSERT(QThread::currentThread() == render_thread);\n', 'void QmlMainWindow::resizeSwapchain()\n{\n    Q_ASSERT(QThread::currentThread() == render_thread);\n\n    if (render_backend == RenderBackend::Vulkan && t2_presentation_minimised.loadAcquire() != 0)\n        return;\n'), ('gui/src/qmlmainwindow.cpp', 'void QmlMainWindow::updateSwapchain()\n{\n    Q_ASSERT(QThread::currentThread() == QGuiApplication::instance()->thread());\n', 'void QmlMainWindow::updateSwapchain()\n{\n    Q_ASSERT(QThread::currentThread() == QGuiApplication::instance()->thread());\n\n    if (render_backend == RenderBackend::Vulkan && t2_presentation_minimised.loadAcquire() != 0)\n        return;\n'), ('gui/src/qmlmainwindow.cpp', '    const qint64 render_entry_us = static_cast<qint64>(chiaki_time_now_monotonic_us());\n    last_render_entry_us.storeRelease(render_entry_us);', '    // Only the render thread updates the non-atomic first-failure timestamp.\n    if (t2_reset_failure_count.fetchAndStoreRelaxed(0) != 0) {\n        swapchain_start_failures.storeRelease(0);\n        swapchain_start_failure_first_us = 0;\n    }\n    if (render_backend == RenderBackend::Vulkan && t2_presentation_minimised.loadAcquire() != 0) {\n        QMutexLocker locker(&render_schedule_mutex);\n        render_scheduled = false;\n        render_pending = false;\n        render_pending_during_cycle.storeRelaxed(0);\n        return;\n    }\n    const qint64 render_entry_us = static_cast<qint64>(chiaki_time_now_monotonic_us());\n    last_render_entry_us.storeRelease(render_entry_us);'), ('gui/src/qmlmainwindow.cpp', '    switch (event->type()) {\n    case QEvent::Expose:\n        if (isExposed())\n            updateSwapchain();\n        else\n            if (quick_render->thread() == QThread::currentThread())\n                destroySwapchain();\n            else\n                QMetaObject::invokeMethod(quick_render, std::bind(&QmlMainWindow::destroySwapchain, this), Qt::BlockingQueuedConnection);\n        break;\n    case QEvent::Move:', '    switch (event->type()) {\n    case QEvent::WindowStateChange: {\n        if (render_backend != RenderBackend::Vulkan)\n            break;\n        // QWindow::isExposed() remained true in the failed T1 minimise session.\n        // The window state is a separate signal that must gate presentation.\n        const bool minimised = windowStates().testFlag(Qt::WindowMinimized);\n        const int old_state = t2_presentation_minimised.fetchAndStoreRelaxed(minimised ? 1 : 0);\n        if (old_state == (minimised ? 1 : 0))\n            break;\n        t2_reset_failure_count.storeRelease(1);\n        qCInfo(chiakiGui) << "[UMCB-T2] Vulkan presentation"\n                          << (minimised ? "suspended (window minimised)" : "resuming (window restored)")\n                          << "exposed=" << isExposed()\n                          << "window=" << size()\n                          << "background_frames=" << t2_background_video_frames.loadAcquire();\n        if (!minimised) {\n            // Recreate on the render thread once the window can be drawn to.\n            swapchain_recreate_pending.storeRelease(1);\n            if (isExposed() && width() > 0 && height() > 0)\n                updateSwapchain();\n        }\n        break;\n    }\n    case QEvent::Expose:\n        if (render_backend == RenderBackend::Vulkan && t2_presentation_minimised.loadAcquire() != 0)\n            break; // Do not destroy/recreate an unavailable native surface on minimise.\n        if (isExposed())\n            updateSwapchain();\n        else\n            if (quick_render->thread() == QThread::currentThread())\n                destroySwapchain();\n            else\n                QMetaObject::invokeMethod(quick_render, std::bind(&QmlMainWindow::destroySwapchain, this), Qt::BlockingQueuedConnection);\n        break;\n    case QEvent::Move:')]
+          paths = sorted({path for path, old, new in patches})
+          originals = {path: Path(path).read_text(encoding='utf-8') for path in paths}
+          updated = dict(originals)
+          for path, old, new in patches:
+              if updated[path].count(old) != 1:
+                  raise SystemExit(f'UMCB-T2 ABORT: expected one exact source anchor in {path}, found {updated[path].count(old)}')
+              updated[path] = updated[path].replace(old, new, 1)
+          for path in paths:
+              if updated[path] == originals[path]:
+                  raise SystemExit(f'UMCB-T2 ABORT: no patch result for {path}')
+          for path in paths:
+              Path(path).write_text(updated[path], encoding='utf-8')
+          print('UMCB-T2: applied guarded Qt minimise/restore presentation patch to two verified files')
+          PYCODE
+          git diff --check
+          git diff --stat
+          test "$(git diff --name-only | sort)" = "$(printf '%s\n' 'gui/src/qmlmainwindow.cpp' 'gui/include/qmlmainwindow.h' | sort)" || { echo 'ABORT: unexpected modified files'; exit 1; }
+      - name: Commit normal source and remove temporary workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add gui/src/qmlmainwindow.cpp gui/include/qmlmainwindow.h
+          git rm .github/workflows/umcb-t2-background-vulkan-bootstrap.yml
+          git diff --cached --check
+          test "$(git diff --cached --name-only | sort)" = "$(printf '%s\n' '.github/workflows/umcb-t2-background-vulkan-bootstrap.yml' 'gui/src/qmlmainwindow.cpp' 'gui/include/qmlmainwindow.h' | sort)" || { echo 'ABORT: unexpected staged files'; exit 1; }
+          git commit -m 'UMCB T2: suspend minimized Vulkan presentation; keep decoded frames [skip ci]'
+          git push origin HEAD:umcb/test-vulkan-background-t2
