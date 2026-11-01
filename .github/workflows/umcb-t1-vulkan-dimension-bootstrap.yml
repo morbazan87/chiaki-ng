@@ -1,0 +1,63 @@
+# UMCB-T1, one-time source patch; not the Windows build workflow.
+# Intended ONLY for a fresh branch created from the frozen foundation SHA.
+name: UMCB T1 One-Time Vulkan Dimension Guard Setup
+on:
+  push:
+    branches:
+      - umcb/test-vulkan-dimension-guard
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  apply-once:
+    if: github.ref == 'refs/heads/umcb/test-vulkan-dimension-guard'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 2
+      - name: Check isolated test branch and original source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "16e6045163743113827645adfda506a243e819d7" || { echo 'ABORT: branch was not created directly from frozen foundation'; exit 1; }
+          test "$(git hash-object gui/src/qmlmainwindow.cpp)" = "c798672986c6be994a626c60f18e2378e30b9348" || { echo 'ABORT: qmlmainwindow.cpp differs from verified foundation source'; exit 1; }
+          test -f .github/workflows/umcb-t1-vulkan-dimension-bootstrap.yml
+          git status --porcelain
+      - name: Apply narrowly scoped source change
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          p = Path("gui/src/qmlmainwindow.cpp")
+          s = p.read_text(encoding="utf-8")
+          old_a = '    const QSize window_size(width() * devicePixelRatio(), height() * devicePixelRatio());\n    const bool swapchain_ready = quick_tex &&'
+          new_a = '    const QSize window_size(width() * devicePixelRatio(), height() * devicePixelRatio());\n    // UMCB-T1: Never ask libplacebo to create a Vulkan texture of zero size.\n    // Keep the original renderer/device-lost fallback handling unchanged.\n    if (render_backend == RenderBackend::Vulkan &&\n        (window_size.width() <= 0 || window_size.height() <= 0)) {\n        if (quick_frame)\n            endFrame();\n        qCWarning(chiakiGui) << "[UMCB-T1] Deferring Vulkan resize: invalid window dimensions"\n                            << "requested=" << window_size\n                            << "window=" << size()\n                            << "dpr=" << devicePixelRatio()\n                            << "exposed=" << isExposed();\n        return;\n    }\n    const bool swapchain_ready = quick_tex &&'
+          old_b = '    QSize new_swapchain_size = window_size;\n    {\n        QMutexLocker locker(&placebo_swapchain_mutex);\n        pl_swapchain_resize(placebo_swapchain, &new_swapchain_size.rwidth(), &new_swapchain_size.rheight());\n    }\n\n    if (quick_frame)\n        endFrame();\n\n    if (render_backend == RenderBackend::OpenGL) {'
+          new_b = '    QSize new_swapchain_size = window_size;\n    bool resize_ok = false;\n    {\n        QMutexLocker locker(&placebo_swapchain_mutex);\n        resize_ok = pl_swapchain_resize(placebo_swapchain, &new_swapchain_size.rwidth(), &new_swapchain_size.rheight());\n    }\n\n    if (quick_frame)\n        endFrame();\n\n    if (render_backend == RenderBackend::Vulkan) {\n        if (!resize_ok || new_swapchain_size.width() <= 0 || new_swapchain_size.height() <= 0) {\n            qCWarning(chiakiGui) << "[UMCB-T1] Deferring Vulkan resize: invalid swapchain result"\n                                << "resize_ok=" << resize_ok\n                                << "requested=" << window_size\n                                << "returned=" << new_swapchain_size\n                                << "window=" << size()\n                                << "dpr=" << devicePixelRatio()\n                                << "exposed=" << isExposed();\n            return;\n        }\n        if (new_swapchain_size != window_size) {\n            qCInfo(chiakiGui) << "[UMCB-T1] Vulkan swapchain adjusted dimensions"\n                             << "requested=" << window_size\n                             << "returned=" << new_swapchain_size;\n        }\n    }\n\n    if (render_backend == RenderBackend::OpenGL) {'
+          for label, old in (("window-size", old_a), ("resize-result", old_b)):
+              if s.count(old) != 1:
+                  raise SystemExit(f"UMCB-T1 ABORT: expected one {label} anchor, found {s.count(old)}; source unchanged")
+          out = s.replace(old_a, new_a, 1).replace(old_b, new_b, 1)
+          if out == s:
+              raise SystemExit("UMCB-T1 ABORT: no changes")
+          p.write_text(out, encoding="utf-8")
+          print("UMCB-T1: applied two guarded edits to qmlmainwindow.cpp only")
+          PYCODE
+          git diff --check
+          git diff --stat
+          test "$(git diff --name-only)" = 'gui/src/qmlmainwindow.cpp'
+      - name: Commit ordinary source and remove setup workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add gui/src/qmlmainwindow.cpp
+          git rm .github/workflows/umcb-t1-vulkan-dimension-bootstrap.yml
+          git diff --cached --check
+          test "$(git diff --cached --name-only | sort)" = "$(printf '%s\n' '.github/workflows/umcb-t1-vulkan-dimension-bootstrap.yml' 'gui/src/qmlmainwindow.cpp' | sort)"
+          git commit -m 'UMCB T1: guard Vulkan swapchain dimensions and log resize outcome [skip ci]'
+          git push origin HEAD:umcb/test-vulkan-dimension-guard
