@@ -19,6 +19,14 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
+      # Configure line endings before checkout. Changing conversion after a
+      # Windows checkout makes the entire CRLF working tree appear modified.
+      - name: Configure Git line endings before checkout
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
       - name: Check out exact T5-derived source branch
         uses: actions/checkout@v4
         with:
@@ -32,12 +40,6 @@ jobs:
           files="$(git diff --name-only 838512a440fb838485fc90d1d2f3542c784d67fd HEAD)"
           test "$files" = '.github/workflows/umcb-t7-lightweight-vulkan-telemetry.yml'
           echo 'T7 base verified: only new workflow differs from pinned T5 source.'
-
-      - name: Disable autocrlf
-        shell: pwsh
-        run: |
-          git config --global core.autocrlf false
-          git config --global core.eol lf
 
       - name: Install T5 MSYS2 dependencies (no validation layers)
         uses: msys2/setup-msys2@v2
@@ -224,9 +226,15 @@ jobs:
           path.write_text(s, encoding='utf-8')
           print('T7 patch complete. T5 counter assignment quick_sem_value = 0 retained.')
           PY
-          git diff --check
+          # Only T7's ephemeral C++ patch may have changed the working tree.
+          changed="$(git diff --name-only)"
+          if test "$changed" != 'gui/src/qmlmainwindow.cpp'; then
+            echo "T7 PATCH ABORT: unexpected changed files: $changed" >&2
+            exit 1
+          fi
+          git diff --check -- gui/src/qmlmainwindow.cpp
           echo 'T7-only source instrumentation:'
-          git diff --stat
+          git diff --stat -- gui/src/qmlmainwindow.cpp
 
       - name: Build pinned T5 libplacebo
         env:
