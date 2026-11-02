@@ -1,0 +1,260 @@
+name: UMCB T6 - Vulkan Sync Diagnostics (T5 base)
+
+on:
+  push:
+    branches:
+      - umcb/test-vulkan-sync-diagnostics-t6
+    paths:
+      - .github/workflows/umcb-t6-vulkan-sync-diagnostics.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-t6:
+    name: T6 MSYS2 portable diagnostic build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Check out immutable successful T5 source
+        uses: actions/checkout@v4
+        with:
+          ref: 838512a440fb838485fc90d1d2f3542c784d67fd
+          submodules: recursive
+
+      - name: Install MSYS2 tools and Khronos validation layer
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: mingw64
+          update: true
+          install: git diffutils
+          pacboy: >-
+            ca-certificates:p
+            cc:p
+            cmake:p
+            curl:p
+            fast_float:p
+            fftw:p
+            json-c:p
+            libevent:p
+            lcms2:p
+            libdovi:p
+            meson:p
+            miniupnpc:p
+            gcc:p
+            nasm:p
+            ninja:p
+            openssl:p
+            opus:p
+            pkgconf:p
+            protobuf:p
+            python:p
+            python-psutil:p
+            python-glad:p
+            python-jinja:p
+            python-pip:p
+            qt6-base:p
+            qt6-declarative:p
+            qt6-svg:p
+            shaderc:p
+            speexdsp:p
+            spirv-cross:p
+            vulkan:p
+            vulkan-headers:p
+            vulkan-validation-layers:p
+
+      - name: Install remaining T5 build tools
+        run: |
+          pip install protobuf
+          pacman -S --noconfirm git make unzip zip
+
+      - name: Apply read-only diagnostic instrumentation to runner checkout
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('gui/src/qmlmainwindow.cpp')
+          source = path.read_text(encoding='utf-8')
+          def replace_exact(old, new, label):
+              global source
+              n = source.count(old)
+              if n != 1:
+                  raise SystemExit(f'T6 source guard FAILED: {label}; expected once, found {n}; refusing to build')
+              source = source.replace(old, new, 1)
+              print(f'T6 source guard OK: {label}')
+          replace_exact(
+              '        struct pl_vk_inst_params vk_inst_params = {\n            .extensions = vk_exts,',
+              '        const bool umcb_t6_validation = qEnvironmentVariableIsSet("UMCB_T6_VALIDATION");\n'
+              '        qCInfo(chiakiGui) << "[UMCB-T6] Vulkan validation requested=" << umcb_t6_validation;\n'
+              '        struct pl_vk_inst_params vk_inst_params = {\n'
+              '            .debug = umcb_t6_validation,\n'
+              '            .debug_extra = false,\n'
+              '            .extensions = vk_exts,',
+              'optional libplacebo Vulkan validation callback')
+          replace_exact(
+              '        placebo_vk_inst = pl_vk_inst_create(placebo_log, &vk_inst_params);\n'
+              '        if (!placebo_vk_inst) {',
+              '        placebo_vk_inst = pl_vk_inst_create(placebo_log, &vk_inst_params);\n'
+              '        if (placebo_vk_inst && umcb_t6_validation) {\n'
+              '            bool found_layer = false;\n'
+              '            for (int layer_idx = 0; layer_idx < placebo_vk_inst->num_layers; ++layer_idx) {\n'
+              '                if (QString::fromUtf8(placebo_vk_inst->layers[layer_idx]) == QStringLiteral("VK_LAYER_KHRONOS_validation"))\n'
+              '                    found_layer = true;\n'
+              '            }\n'
+              '            qCInfo(chiakiGui) << "[UMCB-T6] Khronos validation layer active=" << found_layer;\n'
+              '        }\n'
+              '        if (!placebo_vk_inst) {',
+              'verify active Khronos layer')
+          replace_exact(
+              '    quick_vk_format = vk_format;\n    quick_sem_value = 0;\n    swapchain_size = new_swapchain_size;',
+              '    quick_vk_format = vk_format;\n'
+              '    if (qEnvironmentVariableIsSet("UMCB_T6_VALIDATION")) {\n'
+              '        uint64_t gpu_value = 0;\n'
+              '        VkResult gpu_result = VK_ERROR_INITIALIZATION_FAILED;\n'
+              '        auto get_counter = reinterpret_cast<PFN_vkGetSemaphoreCounterValue>(\n'
+              '            vk_funcs.vkGetDeviceProcAddr(placebo_vulkan->device, "vkGetSemaphoreCounterValue"));\n'
+              '        if (quick_sem && get_counter)\n'
+              '            gpu_result = get_counter(placebo_vulkan->device, quick_sem, &gpu_value);\n'
+              '        qCWarning(chiakiGui) << "[UMCB-T6] Vulkan resize before legacy timeline reset"\n'
+              '                             << "cpu_previous=" << quick_sem_value\n'
+              '                             << "gpu_current=" << gpu_value\n'
+              '                             << "query_result=" << gpu_result\n'
+              '                             << "semaphore_preserved=" << (quick_sem != VK_NULL_HANDLE)\n'
+              '                             << "new_cpu_value=" << 0;\n'
+              '    }\n'
+              '    quick_sem_value = 0;  // T5 behavior UNCHANGED: investigate only\n'
+              '    swapchain_size = new_swapchain_size;',
+              'log live Vulkan timeline counter before original reset')
+          replace_exact(
+              '    if (!quick_tex || !quick_sem || !quick_vk_image)\n        return;\n    quick_sem_value += 1;\n',
+              '    if (!quick_tex || !quick_sem || !quick_vk_image)\n        return;\n'
+              '    if (qEnvironmentVariableIsSet("UMCB_T6_VALIDATION") && quick_sem_value < 3) {\n'
+              '        uint64_t gpu_value = 0;\n'
+              '        VkResult gpu_result = VK_ERROR_INITIALIZATION_FAILED;\n'
+              '        auto get_counter = reinterpret_cast<PFN_vkGetSemaphoreCounterValue>(\n'
+              '            vk_funcs.vkGetDeviceProcAddr(placebo_vulkan->device, "vkGetSemaphoreCounterValue"));\n'
+              '        if (get_counter)\n'
+              '            gpu_result = get_counter(placebo_vulkan->device, quick_sem, &gpu_value);\n'
+              '        qCWarning(chiakiGui) << "[UMCB-T6] Vulkan next hold timeline"\n'
+              '                             << "cpu_next=" << (quick_sem_value + 1)\n'
+              '                             << "gpu_current=" << gpu_value\n'
+              '                             << "query_result=" << gpu_result;\n'
+              '    }\n'
+              '    quick_sem_value += 1;\n',
+              'log first three hold values after the original reset')
+          path.write_text(source, encoding='utf-8')
+          print('T6 verification: all four instrumentation guards passed; T5 timeline behavior deliberately preserved')
+          PY
+
+      - name: Build pinned T5 libplacebo revision
+        env:
+          LIBPLACEBO_VERSION: 3330a515d62139259c26239014f286e233bd3a5c
+        run: |
+          scripts/build-libplacebo-windows.sh
+
+      - name: Set up T5 FFmpeg 7.1 package
+        run: |
+          curl --fail --location --retry 3 --output ffmpeg.zip https://github.com/streetpea/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip
+          unzip -q ffmpeg.zip
+          cp -a ffmpeg-n7.1-latest-win64-gpl-shared-7.1/bin/. /mingw64/bin
+          cp -a ffmpeg-n7.1-latest-win64-gpl-shared-7.1/include/. /mingw64/include
+          cp -a ffmpeg-n7.1-latest-win64-gpl-shared-7.1/lib/. /mingw64/lib
+
+      - name: Build T5 SDL2 compatibility shim
+        run: |
+          INSTALL_PREFIX=/mingw64 scripts/build-sdl2-compat.sh .
+          cp /mingw64/lib/pkgconfig/sdl2-compat.pc /mingw64/lib/pkgconfig/sdl2.pc
+
+      - name: Build diagnostic Chiaki binary
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCHIAKI_ENABLE_CLI=OFF -DCHIAKI_ENABLE_STEAMDECK_NATIVE=OFF
+          cmake --build build --config Release --clean-first --target chiaki
+
+      - name: Deploy portable executable and validation dependencies
+        run: |
+          ./scripts/deploy-windows-msys2.sh chiaki-ng-Win build/gui/chiaki.exe "${{ github.workspace }}/build/third-party/cpp-steam-tools" /mingw64 gui/src/qml
+          test -f /mingw64/bin/VkLayer_khronos_validation.dll
+          test -f /mingw64/bin/VkLayer_khronos_validation.json
+          cp /mingw64/bin/VkLayer_khronos_validation.dll chiaki-ng-Win/
+          cp /mingw64/bin/VkLayer_khronos_validation.json chiaki-ng-Win/
+          # Include the DLL's transitive MSYS2 dependencies, without overwriting already deployed files.
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          output = Path('chiaki-ng-Win')
+          pending = [Path('/mingw64/bin/VkLayer_khronos_validation.dll')]
+          scanned = set()
+          while pending:
+              dll = pending.pop()
+              key = str(dll).lower()
+              if key in scanned:
+                  continue
+              scanned.add(key)
+              result = subprocess.run(['ldd', str(dll)], capture_output=True, text=True, timeout=20)
+              if result.returncode != 0:
+                  raise SystemExit(f'T6: ldd failed for {dll}: {result.stderr}')
+              for line in result.stdout.splitlines():
+                  columns = line.strip().split()
+                  if '=>' not in columns:
+                      continue
+                  index = columns.index('=>')
+                  if index + 1 >= len(columns):
+                      continue
+                  raw = columns[index + 1]
+                  source = Path(raw)
+                  if not source.is_file() or '/mingw64/' not in raw.replace('\\', '/'):
+                      continue
+                  target = output / source.name
+                  if not target.exists():
+                      target.write_bytes(source.read_bytes())
+                      pending.append(source)
+          print('T6 validation library and transitive dependencies bundled')
+          PY
+          python - <<'PY'
+          from pathlib import Path
+          launcher = r'''@echo off
+          setlocal
+          cd /d "%~dp0"
+          if not exist "VkLayer_khronos_validation.dll" (echo T6 validation DLL missing & pause & exit /b 1)
+          if not exist "VkLayer_khronos_validation.json" (echo T6 validation JSON missing & pause & exit /b 1)
+          set "UMCB_T6_VALIDATION=1"
+          set "VK_LAYER_PATH=%~dp0"
+          set "VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation"
+          set "VK_LAYER_VALIDATE_SYNC=1"
+          set "VK_LOADER_DRIVERS_DISABLE=*dzn*"
+          echo UMCB T6 Vulkan sync validation enabled. Use only for short diagnostic sessions.
+          echo Logs: Chiaki session log and T6-vulkan-console.log in this folder.
+          "chiaki.exe" >> "T6-vulkan-console.log" 2>&1
+          echo Chiaki closed. Attach latest Chiaki session log and T6-vulkan-console.log.
+          pause
+          '''
+          Path('chiaki-ng-Win/Launch-UMCB-T6-Vulkan-Validation.cmd').write_bytes(launcher.replace('\n', '\r\n').encode('ascii'))
+          Path('chiaki-ng-Win/T6-READ-ME.txt').write_text(
+              'UMCB T6 diagnostic build from immutable T5 commit 838512a440fb838485fc90d1d2f3542c784d67fd.\n'
+              'Same libplacebo commit 3330a515d62139259c26239014f286e233bd3a5c.\n'
+              'T5 timeline semaphore reset has NOT been changed.\n'
+              'Use Launch-UMCB-T6-Vulkan-Validation.cmd only for short tests.\n'
+              'Validation may be slow or change timing. Keep regular T5 for normal use.\n'
+              'Collect latest Chiaki session log and T6-vulkan-console.log.\n'
+              'If validation cannot load, do not draw conclusions from missing warnings.\n',
+              encoding='utf-8')
+          PY
+
+      - name: Verify and upload portable ZIP
+        run: |
+          test -f chiaki-ng-Win/chiaki.exe
+          test -f chiaki-ng-Win/VkLayer_khronos_validation.dll
+          test -f chiaki-ng-Win/VkLayer_khronos_validation.json
+          test -f chiaki-ng-Win/Launch-UMCB-T6-Vulkan-Validation.cmd
+          zip -qr chiaki-ng-UMCB-T6-Vulkan-Sync-Diagnostics.zip chiaki-ng-Win
+          sha256sum chiaki-ng-UMCB-T6-Vulkan-Sync-Diagnostics.zip
+
+      - name: Upload T6 diagnostic build
+        uses: actions/upload-artifact@v4
+        with:
+          name: chiaki-ng-UMCB-T6-Vulkan-Sync-Diagnostics
+          path: chiaki-ng-UMCB-T6-Vulkan-Sync-Diagnostics.zip
+          if-no-files-found: error
+          retention-days: 7
