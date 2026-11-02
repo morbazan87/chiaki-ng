@@ -6216,7 +6216,7 @@ void QmlMainWindow::sync()
     if (!quick_frame)
         return;
     const qint64 sync_quick_render_begin_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
-        // UMCB-T4: Preserve a pending overlay redraw when sync() reports no new work.
+    // UMCB-T4: Preserve a pending overlay redraw when sync() reports no new work.
     // A previously failed Vulkan hold may have deferred the prior request.
     if (quick_render->sync())
         quick_need_render.storeRelease(1);
@@ -6266,11 +6266,13 @@ void QmlMainWindow::beginFrame()
     // semaphore, Qt Quick rendering, or releasing an image libplacebo did not hold.
     const bool t3_hold_ok = pl_vulkan_hold_ex(placebo_vulkan->gpu, &hold_params);
     if (!t3_hold_ok) {
-                // UMCB-T4: Do not lose Qt Quick work if the held image is unavailable.
+        // UMCB-T4: Do not lose Qt Quick work if the held image is unavailable.
         // Let normal frame pacing retry; no immediate render or busy loop here.
         quick_need_sync.storeRelease(1);
         quick_need_render.storeRelease(1);
         const quint64 failure_no = t3_quick_hold_failures.fetchAndAddRelaxed(1) + 1;
+        if (failure_no == 1)
+            qCInfo(chiakiGui) << "[UMCB-T4] Qt Quick redraw retry armed after failed image hold";
         if (failure_no <= 12 || failure_no % 60 == 0)
             qCWarning(chiakiGui) << "[UMCB-T3] Qt Quick image hold failed; skipped unsafe frame"
                                  << "failure_no=" << failure_no
@@ -6283,8 +6285,6 @@ void QmlMainWindow::beginFrame()
     const qint64 quick_hold_after_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
     if (quick_hold_after_us >= quick_hold_begin_us) {
         const qint64 quick_hold_us = quick_hold_after_us - quick_hold_begin_us;
-        if (failure_no == 1)
-    qCInfo(chiakiGui) << "[UMCB-T4] Qt Quick redraw retry armed after failed image hold";
         if (quick_hold_us >= 1000) {
             CHIAKI_NOISY_DEBUG().nospace()
                 << "[latency] beginFrame_hold_us=" << quick_hold_us;
