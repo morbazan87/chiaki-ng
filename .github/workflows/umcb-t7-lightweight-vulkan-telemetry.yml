@@ -19,8 +19,7 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      # Configure line endings before checkout. Changing conversion after a
-      # Windows checkout makes the entire CRLF working tree appear modified.
+      # Set conversion before checkout, so the repository starts with LF endings.
       - name: Configure Git line endings before checkout
         shell: pwsh
         run: |
@@ -223,10 +222,10 @@ jobs:
                   if (trace)
           ''', 'swapchain recreation trigger')
 
-          path.write_text(s, encoding='utf-8')
+          path.write_bytes(s.encode('utf-8'))  # Raw bytes: no CRLF translation on Windows.
           print('T7 patch complete. T5 counter assignment quick_sem_value = 0 retained.')
           PY
-          # Only T7's ephemeral C++ patch may have changed the working tree.
+          # Only the instrumented source file is permitted to change on the runner.
           changed="$(git diff --name-only)"
           if test "$changed" != 'gui/src/qmlmainwindow.cpp'; then
             echo "T7 PATCH ABORT: unexpected changed files: $changed" >&2
