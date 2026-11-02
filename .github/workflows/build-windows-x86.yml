@@ -30,14 +30,23 @@ jobs:
         run: |
           echo "VCPKG_INSTALLED_DIR=${{ github.workspace }}\build\vcpkg_installed" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      
       - name: Setup Vulkan
         run: |
           $ProgressPreference = 'SilentlyContinue'
-          $ver = (Invoke-WebRequest -Uri "https://vulkan.lunarg.com/sdk/latest.json" | ConvertFrom-Json).windows
-          echo Version $ver
-          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$ver/windows/vulkansdk-windows-X64-$ver.exe" -OutFile VulkanSDK.exe
-          echo Downloaded
-          .\VulkanSDK.exe --root ${{ env.VULKAN_SDK }}  --accept-licenses --default-answer --confirm-command install
+          $url = "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe"
+          & curl.exe --fail --location --silent --show-error --retry 3 --retry-delay 5 --output VulkanSDK.exe $url
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path VulkanSDK.exe)) {
+              throw "Vulkan SDK download failed"
+          }
+          if ((Get-Item VulkanSDK.exe).Length -lt 1000000) {
+              throw "Downloaded Vulkan SDK installer is unexpectedly small"
+          }
+          & .\VulkanSDK.exe --root "${{ env.VULKAN_SDK }}" --accept-licenses --default-answer --confirm-command install
+          if ($LASTEXITCODE -ne 0) {
+              throw "Vulkan SDK installer failed: $LASTEXITCODE"
+          }
+
 
       - name: Set up Ninja
         run: choco install ninja
