@@ -22,6 +22,7 @@
 #endif
 
 class UMCBFrameObserver;
+class UMCBCalibrationCapture;
 class SystemdInhibit;
 #ifdef Q_OS_MACOS
     class MacWakeSleep;
@@ -290,6 +291,7 @@ private:
     StreamSession *session = {};
     QThread *frame_thread = {};
     std::unique_ptr<UMCBFrameObserver> umcb_frame_observer;
+    std::unique_ptr<UMCBCalibrationCapture> umcb_calibration_capture;
     QTimer *psn_reconnect_timer = {};
     QTimer *psn_auto_connect_timer = {};
     QTimer *wakeup_start_timer = {};

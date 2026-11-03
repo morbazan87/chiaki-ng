@@ -1,5 +1,6 @@
 #include "qmlbackend.h"
 #include "umcbframeobserver.h"
+#include "umcbcalibrationcapture.h"
 #include "qmlsettings.h"
 #include "qmlmainwindow.h"
 #include "streamsession.h"
@@ -33,6 +34,11 @@
 #include <QDesktopServices>
 #include <QtConcurrent>
 #include <QTimer>
+#ifdef Q_OS_WIN
+#include <QLocalServer>
+#include <QLocalSocket>
+#include <QCoreApplication>
+#endif
 
 extern "C" {
 #include <chiaki/time.h>
@@ -303,6 +309,54 @@ QmlBackend::QmlBackend(Settings *settings, QmlMainWindow *window)
     // M1.1 is deliberately opt-in. Ordinary Chiaki runs never start this worker.
     if (qEnvironmentVariableIntValue("UMCB_FRAME_OBSERVER") == 1)
         umcb_frame_observer = std::make_unique<UMCBFrameObserver>();
+#ifdef Q_OS_WIN
+    if (qEnvironmentVariableIntValue("UMCB_CALIBRATION") == 1) {
+        umcb_calibration_capture = std::make_unique<UMCBCalibrationCapture>();
+        auto *server = new QLocalServer(this);
+        server->setSocketOptions(QLocalServer::UserAccessOption);
+        const QString pipeName = QStringLiteral("UMCB_CAL_%1").arg(QCoreApplication::applicationPid());
+        if (server->listen(pipeName)) {
+            qInfo().noquote() << "[UMCB-M1.3] Calibration local pipe" << pipeName;
+            connect(server, &QLocalServer::newConnection, this, [this, server] {
+                while (auto *socket = server->nextPendingConnection()) {
+                    connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
+                    connect(socket, &QLocalSocket::readyRead, this, [this, socket] {
+                        QByteArray data = socket->property("umcbRequest").toByteArray() + socket->readAll();
+                        if (data.size() > 96) {
+                            socket->write("ERROR request_too_long\n");
+                            socket->disconnectFromServer();
+                            return;
+                        }
+                        if (!data.contains('\n')) {
+                            socket->setProperty("umcbRequest", data);
+                            return;
+                        }
+                        const QString cmd = QString::fromUtf8(data.left(data.indexOf('\n'))).trimmed();
+                        QString reply;
+                        if (cmd == "STATUS")
+                            reply = umcb_calibration_capture->status();
+                        else if (cmd.startsWith("CAPTURE "))
+                            reply = umcb_calibration_capture->request(cmd.mid(8));
+                        else
+                            reply = "ERROR unknown_command";
+                        socket->write((reply + "\n").toUtf8());
+                        socket->flush();
+                        socket->disconnectFromServer();
+                    });
+                }
+            });
+            auto *watchdog = new QTimer(this);
+            watchdog->setInterval(1000);
+            connect(watchdog, &QTimer::timeout, this, [this] {
+                umcb_calibration_capture->expireStalled();
+            });
+            watchdog->start();
+        } else {
+            qWarning() << "[UMCB-M1.3] Could not open local calibration pipe:" << server->errorString();
+            umcb_calibration_capture.reset();
+        }
+    }
+#endif
 
     PsnConnectionWorker *worker = new PsnConnectionWorker;
     worker->moveToThread(&psn_connection_thread);
@@ -505,6 +559,7 @@ QmlBackend::~QmlBackend()
     frame_thread->wait();
     // The frame-delivery thread cannot use the observer after this point.
     umcb_frame_observer.reset();
+    umcb_calibration_capture.reset();
     frame_thread->parent()->deleteLater();
     psn_connection_thread.quit();
     psn_connection_thread.wait();
@@ -1145,6 +1200,8 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
         // Observe already-prepared CPU pixels without delaying the render handoff.
         if (umcb_frame_observer && !frame.recovered)
             umcb_frame_observer->sample(frame.frame);
+        if (umcb_calibration_capture && !frame.recovered)
+            umcb_calibration_capture->observe(frame.frame);
         const qint64 delivery_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
         QmlMainWindow *target_window = window;
         QMetaObject::invokeMethod(target_window, [target_window, frame, frames_lost, delivery_us]() mutable {
@@ -1170,6 +1227,8 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
         pending_recovered_frame.storeRelaxed(0);
         if (umcb_frame_observer)
             umcb_frame_observer->clearPending();
+        if (umcb_calibration_capture)
+            umcb_calibration_capture->cancelSession();
         {
             QMutexLocker locker(&hw_transfer_state_mutex);
             logged_hw_transfer_formats.clear();
@@ -1222,6 +1281,8 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
     chiaki_log_ctx = session->GetChiakiLog();
     chiaki_log_mutex.unlock();
     // This is after the session log is attached, unlike the worker constructor.
+    qCInfo(chiakiGui) << "[UMCB-M1.3] calibration_enabled="
+                      << (umcb_calibration_capture ? 1 : 0);
     qCInfo(chiakiGui) << "[UMCB-M1.1] session_observer_enabled="
                       << (umcb_frame_observer ? 1 : 0)
                       << "sampling_max_fps=2";
