@@ -46,6 +46,8 @@ set(SOURCE_FILES
 	src/qmlmainwindow.cpp
 	include/qmlbackend.h
 	src/qmlbackend.cpp
+	include/umcbframeobserver.h
+	src/umcbframeobserver.cpp
 	include/qmlcontroller.h
 	src/qmlcontroller.cpp
 	include/qmlsettings.h

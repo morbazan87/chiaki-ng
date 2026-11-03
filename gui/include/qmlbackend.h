@@ -15,11 +15,13 @@
 #include <QFutureWatcher>
 #include <QFuture>
 #include <QAtomicInteger>
+#include <memory>
 #ifdef CHIAKI_HAVE_WEBENGINE
 #include <QQuickWebEngineProfile>
 #include <QWebEngineUrlRequestInterceptor>
 #endif
 
+class UMCBFrameObserver;
 class SystemdInhibit;
 #ifdef Q_OS_MACOS
     class MacWakeSleep;
@@ -287,6 +289,7 @@ private:
     QmlMainWindow *window = {};
     StreamSession *session = {};
     QThread *frame_thread = {};
+    std::unique_ptr<UMCBFrameObserver> umcb_frame_observer;
     QTimer *psn_reconnect_timer = {};
     QTimer *psn_auto_connect_timer = {};
     QTimer *wakeup_start_timer = {};

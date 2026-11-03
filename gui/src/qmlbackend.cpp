@@ -1,4 +1,5 @@
 #include "qmlbackend.h"
+#include "umcbframeobserver.h"
 #include "qmlsettings.h"
 #include "qmlmainwindow.h"
 #include "streamsession.h"
@@ -299,6 +300,9 @@ QmlBackend::QmlBackend(Settings *settings, QmlMainWindow *window)
     frame_thread->setObjectName("frame");
     frame_thread->start();
     frame_obj->moveToThread(frame_thread);
+    // M1.1 is deliberately opt-in. Ordinary Chiaki runs never start this worker.
+    if (qEnvironmentVariableIntValue("UMCB_FRAME_OBSERVER") == 1)
+        umcb_frame_observer = std::make_unique<UMCBFrameObserver>();
 
     PsnConnectionWorker *worker = new PsnConnectionWorker;
     worker->moveToThread(&psn_connection_thread);
@@ -499,6 +503,8 @@ QmlBackend::~QmlBackend()
 #endif
     frame_thread->quit();
     frame_thread->wait();
+    // The frame-delivery thread cannot use the observer after this point.
+    umcb_frame_observer.reset();
     frame_thread->parent()->deleteLater();
     psn_connection_thread.quit();
     psn_connection_thread.wait();
@@ -1136,6 +1142,9 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
             frame.recovered = true;
         }
 
+        // Observe already-prepared CPU pixels without delaying the render handoff.
+        if (umcb_frame_observer && !frame.recovered)
+            umcb_frame_observer->sample(frame.frame);
         const qint64 delivery_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
         QmlMainWindow *target_window = window;
         QMetaObject::invokeMethod(target_window, [target_window, frame, frames_lost, delivery_us]() mutable {
@@ -1159,6 +1168,8 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
         chiaki_log_ctx = nullptr;
         chiaki_log_mutex.unlock();
         pending_recovered_frame.storeRelaxed(0);
+        if (umcb_frame_observer)
+            umcb_frame_observer->clearPending();
         {
             QMutexLocker locker(&hw_transfer_state_mutex);
             logged_hw_transfer_formats.clear();
