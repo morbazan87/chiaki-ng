@@ -1,0 +1,436 @@
+name: UMCB M1.1 - Bootstrap Opt-In Decoded Frame Observer
+
+on:
+  push:
+    branches:
+      - umcb/m1-decoded-frame-observer
+    paths:
+      - .github/workflows/umcb-m1-1-bootstrap.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  install-m1-1-observer:
+    name: Install and self-retire opt-in M1.1 observer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify new branch is exactly Foundation V2 plus this bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=704824fc11fdbee7e25c557e78b74ba853b25ef8
+          test "$(git rev-parse HEAD^)" = "$base"
+          test "$(git diff --name-only "$base" HEAD)" = '.github/workflows/umcb-m1-1-bootstrap.yml'
+          test "$(git rev-parse HEAD:gui/CMakeLists.txt)" = '7e777e1fd63d5e4962c0012b092f5d6136525ed5'
+          test "$(git rev-parse HEAD:gui/include/qmlbackend.h)" = '84a28d2d04d0e0956440f2c4e1ce3272ba6a0d94'
+          test "$(git rev-parse HEAD:gui/src/qmlbackend.cpp)" = 'e567f48ebd3088611c0dbbb21d3a17acebca41d9'
+          test "$(git rev-parse HEAD:gui/src/qmlmainwindow.cpp)" = '231872b899108bfce83a4e8a95b8d6ce098a2777'
+          test ! -e gui/include/umcbframeobserver.h
+          test ! -e gui/src/umcbframeobserver.cpp
+          echo 'PASS: exact accepted Foundation V2 parent, source blobs, and one bootstrap file.'
+      - name: Install observer source and check every exact patch anchor
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > 'gui/include/umcbframeobserver.h' <<'UMCB_M11_UMCBFRAMEOBSERVER_H'
+          // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
+          // UMCB M1.1: opt-in, read-only sampling of CPU-accessible decoded frames.
+          #pragma once
+
+          #include <atomic>
+          #include <condition_variable>
+          #include <cstdint>
+          #include <mutex>
+          #include <thread>
+
+          struct AVFrame;
+
+          class UMCBFrameObserver final
+          {
+          public:
+              UMCBFrameObserver();
+              ~UMCBFrameObserver();
+              UMCBFrameObserver(const UMCBFrameObserver &) = delete;
+              UMCBFrameObserver &operator=(const UMCBFrameObserver &) = delete;
+
+              // Called only after Chiaki has prepared a decoded frame for presentation.
+              // Never consumes ownership of the original frame; never blocks on the worker.
+              void sample(const AVFrame *frame);
+              // Releases any frame waiting for the worker when a Remote Play session ends.
+              void clearPending();
+
+          private:
+              void workerLoop();
+              static int64_t monotonicUs();
+              static bool downsampleGray(const AVFrame *frame, unsigned char *out);
+
+              std::atomic<int64_t> nextSampleUs_{0};
+              std::atomic<uint64_t> skippedBusy_{0};
+              std::atomic<uint64_t> skippedUnsupported_{0};
+              std::atomic<uint64_t> skippedLock_{0};
+              std::atomic<uint64_t> cloneFailures_{0};
+              std::mutex mutex_;
+              std::condition_variable wake_;
+              std::thread worker_;
+              AVFrame *pending_ = nullptr;
+              int64_t pendingAtUs_ = 0;
+              uint64_t generation_ = 0;
+              bool workerBusy_ = false;
+              bool stopping_ = false;
+          };
+          UMCB_M11_UMCBFRAMEOBSERVER_H
+          cat > 'gui/src/umcbframeobserver.cpp' <<'UMCB_M11_UMCBFRAMEOBSERVER_CPP'
+          // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
+          #include "umcbframeobserver.h"
+
+          #include <QDebug>
+          #include <algorithm>
+          #include <array>
+          #include <chrono>
+          #include <cmath>
+          #include <cstddef>
+          #include <cstring>
+          #include <limits>
+
+          extern "C" {
+          #include <libavutil/frame.h>
+          #include <libavutil/pixfmt.h>
+          }
+
+          namespace {
+          constexpr int kW = 320;
+          constexpr int kH = 180;
+          constexpr int64_t kSampleIntervalUs = 500000;  // At most 2 fps.
+          constexpr int64_t kReportIntervalUs = 10000000; // Aggregate logs every 10 s.
+          using GrayFrame = std::array<unsigned char, kW * kH>;
+
+          bool formatSupported(int fmt)
+          {
+              switch (fmt) {
+              case AV_PIX_FMT_NV12:
+              case AV_PIX_FMT_YUV420P:
+              case AV_PIX_FMT_YUVJ420P:
+              case AV_PIX_FMT_GRAY8:
+              case AV_PIX_FMT_P010LE:
+              case AV_PIX_FMT_YUV420P10LE:
+              case AV_PIX_FMT_BGRA:
+              case AV_PIX_FMT_RGBA:
+              case AV_PIX_FMT_BGR24:
+              case AV_PIX_FMT_RGB24:
+                  return true;
+              default:
+                  return false;
+              }
+          }
+          }
+
+          int64_t UMCBFrameObserver::monotonicUs()
+          {
+              return std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch()).count();
+          }
+
+          UMCBFrameObserver::UMCBFrameObserver()
+              : worker_(&UMCBFrameObserver::workerLoop, this)
+          {
+              qInfo() << "[UMCB-M1.1] Observer enabled (2 fps, 320x180 grayscale, RAM only)";
+          }
+
+          UMCBFrameObserver::~UMCBFrameObserver()
+          {
+              {
+                  std::lock_guard<std::mutex> lock(mutex_);
+                  stopping_ = true;
+                  if (pending_)
+                      av_frame_free(&pending_);
+              }
+              wake_.notify_one();
+              if (worker_.joinable())
+                  worker_.join();
+              qInfo() << "[UMCB-M1.1] Observer stopped";
+          }
+
+          void UMCBFrameObserver::clearPending()
+          {
+              {
+                  std::lock_guard<std::mutex> lock(mutex_);
+                  ++generation_;
+                  if (pending_)
+                      av_frame_free(&pending_);
+                  pendingAtUs_ = 0;
+              }
+              nextSampleUs_.store(0, std::memory_order_relaxed);
+          }
+
+          void UMCBFrameObserver::sample(const AVFrame *frame)
+          {
+              const int64_t now_us = monotonicUs();
+              const int64_t next = nextSampleUs_.load(std::memory_order_relaxed);
+              if (now_us < next)
+                  return;
+              // This callback is owned by Chiaki's single frame-delivery thread.
+              nextSampleUs_.store(now_us + kSampleIntervalUs, std::memory_order_relaxed);
+
+              if (!frame || frame->hw_frames_ctx || !formatSupported(frame->format) ||
+                  !frame->data[0] || !frame->buf[0] || frame->width <= 0 || frame->height <= 0 ||
+                  frame->width > 8192 || frame->height > 8192 ||
+                  frame->linesize[0] == 0) {
+                  skippedUnsupported_.fetch_add(1, std::memory_order_relaxed);
+                  return;
+              }
+
+              std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+              if (!lock.owns_lock()) {
+                  skippedLock_.fetch_add(1, std::memory_order_relaxed);
+                  return;
+              }
+              if (stopping_ || workerBusy_ || pending_) {
+                  skippedBusy_.fetch_add(1, std::memory_order_relaxed);
+                  return;
+              }
+              AVFrame *clone = av_frame_clone(frame); // Reference, not full-resolution pixel copy.
+              if (!clone) {
+                  cloneFailures_.fetch_add(1, std::memory_order_relaxed);
+                  return;
+              }
+              pending_ = clone;
+              pendingAtUs_ = now_us;
+              lock.unlock();
+              wake_.notify_one();
+          }
+
+          bool UMCBFrameObserver::downsampleGray(const AVFrame *frame, unsigned char *out)
+          {
+              if (!frame || !out || !frame->data[0] || !formatSupported(frame->format))
+                  return false;
+              const int fmt = frame->format;
+              const bool is10 = fmt == AV_PIX_FMT_P010LE || fmt == AV_PIX_FMT_YUV420P10LE;
+              const bool rgba = fmt == AV_PIX_FMT_RGBA || fmt == AV_PIX_FMT_BGRA;
+              const bool rgb = fmt == AV_PIX_FMT_RGB24 || fmt == AV_PIX_FMT_BGR24;
+              const int pixelBytes = is10 ? 2 : rgba ? 4 : rgb ? 3 : 1;
+              const int64_t absStride = frame->linesize[0] < 0
+                  ? -static_cast<int64_t>(frame->linesize[0]) : frame->linesize[0];
+              if (frame->width <= 0 || frame->height <= 0 || frame->width > 8192 ||
+                  frame->height > 8192 || absStride < static_cast<int64_t>(frame->width) * pixelBytes)
+                  return false;
+
+              for (int y = 0; y < kH; ++y) {
+                  const int srcY = std::min(frame->height - 1,
+                                             static_cast<int>((static_cast<int64_t>(2 * y + 1) * frame->height) / (2 * kH)));
+                  const unsigned char *row = frame->data[0] +
+                      static_cast<std::ptrdiff_t>(srcY) * frame->linesize[0];
+                  for (int x = 0; x < kW; ++x) {
+                      const int srcX = std::min(frame->width - 1,
+                                                 static_cast<int>((static_cast<int64_t>(2 * x + 1) * frame->width) / (2 * kW)));
+                      unsigned char value = 0;
+                      if (is10) {
+                          uint16_t v;
+                          std::memcpy(&v, row + static_cast<std::ptrdiff_t>(srcX) * 2, sizeof(v));
+                          value = static_cast<unsigned char>(fmt == AV_PIX_FMT_P010LE ? v >> 8 : v >> 2);
+                      } else if (rgba || rgb) {
+                          const unsigned char *pixel = row + static_cast<std::ptrdiff_t>(srcX) * pixelBytes;
+                          const bool bg = fmt == AV_PIX_FMT_BGRA || fmt == AV_PIX_FMT_BGR24;
+                          const int r = pixel[bg ? 2 : 0];
+                          const int g = pixel[1];
+                          const int b = pixel[bg ? 0 : 2];
+                          value = static_cast<unsigned char>((77 * r + 150 * g + 29 * b) >> 8);
+                      } else {
+                          value = row[srcX];
+                      }
+                      out[y * kW + x] = value;
+                  }
+              }
+              return true;
+          }
+
+          void UMCBFrameObserver::workerLoop()
+          {
+              GrayFrame current{};
+              GrayFrame previous{};
+              bool havePrevious = false;
+              uint64_t priorGeneration = 0;
+              uint64_t processed = 0;
+              uint64_t changed = 0;
+              uint64_t invalid = 0;
+              uint64_t sumProcessUs = 0;
+              int64_t maxProcessUs = 0;
+              int64_t maxEndToEndUs = 0;
+              int64_t lastReportUs = monotonicUs();
+
+              for (;;) {
+                  AVFrame *frame = nullptr;
+                  int64_t enqueuedAtUs = 0;
+                  uint64_t generation = 0;
+                  {
+                      std::unique_lock<std::mutex> lock(mutex_);
+                      wake_.wait_for(lock, std::chrono::seconds(1), [this] {
+                          return stopping_ || pending_ != nullptr;
+                      });
+                      if (stopping_)
+                          break;
+                      if (pending_) {
+                          frame = pending_;
+                          pending_ = nullptr;
+                          enqueuedAtUs = pendingAtUs_;
+                          pendingAtUs_ = 0;
+                          generation = generation_;
+                          workerBusy_ = true;
+                      }
+                  }
+                  if (frame) {
+                      if (generation != priorGeneration) {
+                          havePrevious = false;
+                          priorGeneration = generation;
+                      }
+                      const int64_t workStartUs = monotonicUs();
+                      const bool ok = downsampleGray(frame, current.data());
+                      av_frame_free(&frame);
+                      const int64_t workEndUs = monotonicUs();
+                      {
+                          std::lock_guard<std::mutex> lock(mutex_);
+                          workerBusy_ = false;
+                          if (generation != generation_)
+                              havePrevious = false;
+                          else if (ok) {
+                              if (havePrevious) {
+                                  int different = 0;
+                                  for (size_t i = 0; i < current.size(); ++i) {
+                                      if (std::abs(int(current[i]) - int(previous[i])) >= 12)
+                                          ++different;
+                                  }
+                                  if (different > static_cast<int>(current.size() / 50))
+                                      ++changed; // >2% of sampled pixels have meaningful luma difference.
+                              }
+                              previous = current;
+                              havePrevious = true;
+                              ++processed;
+                              const int64_t workUs = workEndUs - workStartUs;
+                              sumProcessUs += static_cast<uint64_t>(std::max<int64_t>(0, workUs));
+                              maxProcessUs = std::max(maxProcessUs, workUs);
+                              maxEndToEndUs = std::max(maxEndToEndUs, workEndUs - enqueuedAtUs);
+                          } else {
+                              ++invalid;
+                          }
+                      }
+                  }
+                  const int64_t nowUs = monotonicUs();
+                  if (nowUs - lastReportUs >= kReportIntervalUs) {
+                      const auto busy = skippedBusy_.exchange(0, std::memory_order_relaxed);
+                      const auto unsupported = skippedUnsupported_.exchange(0, std::memory_order_relaxed);
+                      const auto contention = skippedLock_.exchange(0, std::memory_order_relaxed);
+                      const auto cloneFailed = cloneFailures_.exchange(0, std::memory_order_relaxed);
+                      if (processed || invalid || busy || unsupported || contention || cloneFailed) {
+                          qInfo().noquote() << "[UMCB-M1.1] window_10s processed=" << processed
+                              << "changed=" << changed << "invalid=" << invalid
+                              << "busy=" << busy << "unsupported=" << unsupported
+                              << "lock_miss=" << contention << "clone_failed=" << cloneFailed
+                              << "avg_work_us=" << (processed ? sumProcessUs / processed : 0)
+                              << "max_work_us=" << maxProcessUs
+                              << "max_latency_us=" << maxEndToEndUs;
+                      }
+                      processed = changed = invalid = sumProcessUs = 0;
+                      maxProcessUs = maxEndToEndUs = 0;
+                      lastReportUs = nowUs;
+                  }
+              }
+          }
+          UMCB_M11_UMCBFRAMEOBSERVER_CPP
+          cat > '/tmp/apply_m1_1.py' <<'UMCB_M11_APPLY_M1_1_PY'
+          #!/usr/bin/env python3
+          """UMCB M1.1: apply the isolated observer to a *verified* Foundation V2 tree.
+          This script is intended to be run by the one-shot GitHub Actions bootstrap.
+          """
+          from pathlib import Path
+
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              data = p.read_bytes()
+              a = old.encode("utf-8")
+              b = new.encode("utf-8")
+              occurrences = data.count(a)
+              if occurrences != 1:
+                  raise RuntimeError(f"ABORT {path}: expected one anchor, got {occurrences}: {old[:100]!r}")
+              p.write_bytes(data.replace(a, b, 1))
+
+          # NOTE: The bootstrap itself checks exact known source blob hashes at the baseline.
+          replace_once("gui/CMakeLists.txt",
+              "\tinclude/qmlbackend.h\n\tsrc/qmlbackend.cpp\n",
+              "\tinclude/qmlbackend.h\n\tsrc/qmlbackend.cpp\n\tinclude/umcbframeobserver.h\n\tsrc/umcbframeobserver.cpp\n")
+          replace_once("gui/include/qmlbackend.h",
+              "class SystemdInhibit;\n",
+              "class UMCBFrameObserver;\nclass SystemdInhibit;\n")
+          replace_once("gui/include/qmlbackend.h",
+              "#include <QAtomicInteger>\n",
+              "#include <QAtomicInteger>\n#include <memory>\n")
+          replace_once("gui/include/qmlbackend.h",
+              "    QThread *frame_thread = {};\n",
+              "    QThread *frame_thread = {};\n    std::unique_ptr<UMCBFrameObserver> umcb_frame_observer;\n")
+          replace_once("gui/src/qmlbackend.cpp",
+              '#include "qmlbackend.h"\n',
+              '#include "qmlbackend.h"\n#include "umcbframeobserver.h"\n')
+          replace_once("gui/src/qmlbackend.cpp",
+              '    frame_obj->moveToThread(frame_thread);\n',
+              '    frame_obj->moveToThread(frame_thread);\n'
+              '    // M1.1 is deliberately opt-in. Ordinary Chiaki runs never start this worker.\n'
+              '    if (qEnvironmentVariableIntValue("UMCB_FRAME_OBSERVER") == 1)\n'
+              '        umcb_frame_observer = std::make_unique<UMCBFrameObserver>();\n')
+          replace_once("gui/src/qmlbackend.cpp",
+              '    frame_thread->quit();\n    frame_thread->wait();\n    frame_thread->parent()->deleteLater();\n',
+              '    frame_thread->quit();\n    frame_thread->wait();\n'
+              '    // The frame-delivery thread cannot use the observer after this point.\n'
+              '    umcb_frame_observer.reset();\n'
+              '    frame_thread->parent()->deleteLater();\n')
+          replace_once("gui/src/qmlbackend.cpp",
+              '        const qint64 delivery_us = static_cast<qint64>(chiaki_time_now_monotonic_us());\n'
+              '        QmlMainWindow *target_window = window;\n',
+              '        // Observe already-prepared CPU pixels without delaying the render handoff.\n'
+              '        if (umcb_frame_observer && !frame.recovered)\n'
+              '            umcb_frame_observer->sample(frame.frame);\n'
+              '        const qint64 delivery_us = static_cast<qint64>(chiaki_time_now_monotonic_us());\n'
+              '        QmlMainWindow *target_window = window;\n')
+          replace_once("gui/src/qmlbackend.cpp",
+              '        pending_recovered_frame.storeRelaxed(0);\n        {\n            QMutexLocker locker(&hw_transfer_state_mutex);\n',
+              '        pending_recovered_frame.storeRelaxed(0);\n'
+              '        if (umcb_frame_observer)\n'
+              '            umcb_frame_observer->clearPending();\n'
+              '        {\n            QMutexLocker locker(&hw_transfer_state_mutex);\n')
+
+          cpp = Path("gui/src/umcbframeobserver.cpp").read_text(encoding="utf-8")
+          h = Path("gui/include/umcbframeobserver.h").read_text(encoding="utf-8")
+          assert 'kSampleIntervalUs = 500000' in cpp
+          assert 'std::unique_ptr<UMCBFrameObserver>' in Path("gui/include/qmlbackend.h").read_text(encoding="utf-8")
+          assert 'umcb_frame_observer->sample(frame.frame)' in Path("gui/src/qmlbackend.cpp").read_text(encoding="utf-8")
+          assert 'std::thread' in h
+          assert 'pl_tex_download' not in cpp
+          assert 'av_hwframe_transfer_data' not in cpp
+          print("PASS: M1.1 opt-in decoded-frame observer installed; Vulkan/renderer untouched.")
+          UMCB_M11_APPLY_M1_1_PY
+          python3 /tmp/apply_m1_1.py
+          python3 -m py_compile /tmp/apply_m1_1.py
+          git diff --check
+          test "$(git diff --name-only)" = "$(printf 'gui/CMakeLists.txt\ngui/include/qmlbackend.h\ngui/src/qmlbackend.cpp')"
+          test "$(git ls-files --others --exclude-standard)" = "$(printf 'gui/include/umcbframeobserver.h\ngui/src/umcbframeobserver.cpp')"
+          echo 'PASS: source-only changes and one-backlog observer.'
+      - name: Commit the five source changes, remove one-time bootstrap, enforce exact diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=704824fc11fdbee7e25c557e78b74ba853b25ef8
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm .github/workflows/umcb-m1-1-bootstrap.yml
+          git add -- gui/CMakeLists.txt gui/include/qmlbackend.h gui/include/umcbframeobserver.h gui/src/qmlbackend.cpp gui/src/umcbframeobserver.cpp .github/workflows/umcb-m1-1-bootstrap.yml
+          git diff --cached --check
+          git commit -m 'UMCB M1.1: opt-in bounded decoded-frame observer [skip ci]'
+          expected="$(printf 'gui/CMakeLists.txt\ngui/include/qmlbackend.h\ngui/include/umcbframeobserver.h\ngui/src/qmlbackend.cpp\ngui/src/umcbframeobserver.cpp')"
+          test "$(git diff --name-only "$base" HEAD)" = "$expected"
+          git diff --check "$base" HEAD
+          git push origin HEAD:umcb/m1-decoded-frame-observer
+          echo 'PASS: isolated observer branch updated; Foundation V2 remains untouched.'
