@@ -1,0 +1,295 @@
+name: UMCB T8 - Semaphore Continuity Test (T5 base)
+
+on:
+  push:
+    branches:
+      - umcb/test-vulkan-semaphore-continuity-t8
+    paths:
+      - .github/workflows/umcb-t8-vulkan-semaphore-continuity.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-t8:
+    name: T8 MSYS2 Vulkan semaphore continuity test
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      # Set conversion before checkout, so the repository starts with LF endings.
+      - name: Configure Git line endings before checkout
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Check out exact T5-derived source branch
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Verify branch descends directly from frozen T5
+        shell: bash
+        run: |
+          git merge-base --is-ancestor 838512a440fb838485fc90d1d2f3542c784d67fd HEAD
+          files="$(git diff --name-only 838512a440fb838485fc90d1d2f3542c784d67fd HEAD)"
+          test "$files" = '.github/workflows/umcb-t8-vulkan-semaphore-continuity.yml'
+          echo 'T8 base verified: only new workflow differs from pinned T5 source.'
+
+      - name: Install T5 MSYS2 dependencies (no validation layers)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: mingw64
+          update: true
+          install: git diffutils
+          pacboy: >-
+            ca-certificates:p
+            cc:p
+            cmake:p
+            curl:p
+            fast_float:p
+            fftw:p
+            json-c:p
+            libevent:p
+            lcms2:p
+            libdovi:p
+            meson:p
+            miniupnpc:p
+            gcc:p
+            nasm:p
+            ninja:p
+            openssl:p
+            opus:p
+            pkgconf:p
+            protobuf:p
+            python:p
+            python-psutil:p
+            python-glad:p
+            python-jinja:p
+            python-pip:p
+            qt6-base:p
+            qt6-declarative:p
+            qt6-svg:p
+            shaderc:p
+            speexdsp:p
+            spirv-cross:p
+            vulkan:p
+            vulkan-headers:p
+
+      - name: Install build prerequisites
+        run: |
+          pip install protobuf
+          pacman -S git make unzip zip --noconfirm
+
+      - name: Apply T8 counter continuity and retained telemetry on runner ONLY
+        run: |
+          python - <<'PY'
+          #!/usr/bin/env python3
+          """T8 runner-only counter continuity + retained diagnostics; refuses non-T5 anchors."""
+          from pathlib import Path
+
+          path = Path('gui/src/qmlmainwindow.cpp')
+          s = path.read_text(encoding='utf-8')
+
+          def replace_once(old, new, label):
+              global s
+              count = s.count(old)
+              if count != 1:
+                  raise SystemExit(f'T8 PATCH ABORT: {label} expected once, found {count}')
+              s = s.replace(old, new, 1)
+              print(f'T8 instrumentation: {label} applied')
+
+          replace_once('#include <QFile>\n', '#include <QFile>\n#include <QDateTime>\n#include <QMutex>\n#include <QMutexLocker>\n', 'header imports')
+
+          helper = r'''// UMCB T8: run-only, low-volume diagnostics. No Vulkan validation layer,
+          // and no changes to image ownership, GPU waits, or frame pacing.
+          static void umcbT8Log(const QString &text)
+          {
+              if (!qEnvironmentVariableIsSet("UMCB_T8_DIAG"))
+                  return;
+              static QMutex log_mutex;
+              QMutexLocker locker(&log_mutex);
+              QFile file(QCoreApplication::applicationDirPath() + QStringLiteral("/T8-vulkan-diagnostics.log"));
+              if (!file.open(QIODevice::WriteOnly | QIODevice::Append))
+                  return;
+              const QByteArray line = (QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)
+                                       + QStringLiteral(" ") + text + QLatin1Char('\n')).toUtf8();
+              (void)file.write(line);
+          }
+
+          static void umcbT8LogSemaphore(const char *phase, VkDevice device,
+                                         PFN_vkGetDeviceProcAddr get_proc, VkSemaphore semaphore,
+                                         uint64_t cpu_value, uint64_t restore_generation)
+          {
+              if (!qEnvironmentVariableIsSet("UMCB_T8_DIAG"))
+                  return;
+              VkResult result = VK_ERROR_INITIALIZATION_FAILED;
+              uint64_t gpu_value = 0;
+              if (get_proc && semaphore != VK_NULL_HANDLE) {
+                  auto get_counter = reinterpret_cast<PFN_vkGetSemaphoreCounterValue>(
+                      get_proc(device, "vkGetSemaphoreCounterValue"));
+                  if (get_counter)
+                      result = get_counter(device, semaphore, &gpu_value);
+              }
+              umcbT8Log(QStringLiteral("%1 cpu_value=%2 gpu_result=%3 gpu_value=%4 semaphore_present=%5 restore_generation=%6")
+                  .arg(QString::fromLatin1(phase))
+                  .arg(QString::number(static_cast<qulonglong>(cpu_value)))
+                  .arg(static_cast<int>(result))
+                  .arg(QString::number(static_cast<qulonglong>(gpu_value)))
+                  .arg(semaphore != VK_NULL_HANDLE ? 1 : 0)
+                  .arg(QString::number(static_cast<qulonglong>(restore_generation))));
+          }
+
+          '''
+          replace_once('Q_LOGGING_CATEGORY(chiakiGui, "chiaki.gui", QtInfoMsg);\n\n',
+                       'Q_LOGGING_CATEGORY(chiakiGui, "chiaki.gui", QtInfoMsg);\n\n'+helper, 'independent log writer')
+
+          replace_once('    render_backend = settings->GetRenderBackend();\n    setSurfaceType(',
+                       '''    render_backend = settings->GetRenderBackend();
+              umcbT8Log(QStringLiteral("init chosen_backend=%1")
+                  .arg(render_backend == RenderBackend::Vulkan ? QStringLiteral("Vulkan") : QStringLiteral("OpenGL")));
+              setSurfaceType(''', 'initial backend selection')
+
+          replace_once('        qCWarning(chiakiGui) << "Vulkan renderer initialization failed, falling back to OpenGL:" << reason;\n',
+                       '        qCWarning(chiakiGui) << "Vulkan renderer initialization failed, falling back to OpenGL:" << reason;\n        umcbT8Log(QStringLiteral("vulkan_startup_fallback reason=") + reason);\n', 'fallback reason')
+
+          replace_once('        placebo_vk_inst = pl_vk_inst_create(placebo_log, &vk_inst_params);\n        if (!placebo_vk_inst) {',
+                       '''        umcbT8Log(QStringLiteral("vulkan_instance_create_begin"));
+                  placebo_vk_inst = pl_vk_inst_create(placebo_log, &vk_inst_params);
+                  umcbT8Log(QStringLiteral("vulkan_instance_create_end success=%1").arg(placebo_vk_inst != nullptr));
+                  if (!placebo_vk_inst) {''', 'Vulkan instance trace')
+
+          replace_once('        placebo_vulkan = pl_vulkan_create(placebo_log, &vulkan_params);\n        if (!placebo_vulkan) {',
+                       '''        umcbT8Log(QStringLiteral("vulkan_device_create_begin"));
+                  placebo_vulkan = pl_vulkan_create(placebo_log, &vulkan_params);
+                  umcbT8Log(QStringLiteral("vulkan_device_create_end success=%1").arg(placebo_vulkan != nullptr));
+                  if (!placebo_vulkan) {''', 'Vulkan device trace')
+
+          replace_once('renderer_backend_ready:\n    struct pl_cache_params',
+                       '''renderer_backend_ready:
+              umcbT8Log(QStringLiteral("renderer_backend_ready selected=%1")
+                  .arg(render_backend == RenderBackend::Vulkan ? QStringLiteral("Vulkan") : QStringLiteral("OpenGL")));
+              struct pl_cache_params''', 'renderer ready trace')
+
+          replace_once('    quick_vk_format = vk_format;\n    quick_sem_value = 0;\n    swapchain_size = new_swapchain_size;',
+                       '''    quick_vk_format = vk_format;
+              // UMCB T8: Keep the CPU signal value monotonic for this same semaphore.
+              // The texture is replaced, but the timeline semaphore is not recreated.
+              umcbT8LogSemaphore("resize_counter_preserved", placebo_vulkan->device,
+                  vk_funcs.vkGetDeviceProcAddr, quick_sem, quick_sem_value,
+                  t3_restore_generation.loadAcquire());
+              umcbT8Log(QStringLiteral("resize_next_cpu_signal=%1")
+                  .arg(QString::number(static_cast<qulonglong>(quick_sem_value + 1))));
+              swapchain_size = new_swapchain_size;''', 'sem counter reset observation')
+
+          replace_once('    if (!quick_tex || !quick_sem || !quick_vk_image)\n        return;\n    quick_sem_value += 1;\n',
+                       '''    if (!quick_tex || !quick_sem || !quick_vk_image)
+                  return;
+              // Initial two nonblocking counter queries; no extra waits.
+              if (quick_sem_value < 2)
+                  umcbT8LogSemaphore("begin_frame_before_hold", placebo_vulkan->device,
+                      vk_funcs.vkGetDeviceProcAddr, quick_sem, quick_sem_value + 1,
+                      t3_restore_generation.loadAcquire());
+              quick_sem_value += 1;
+          ''', 'initial first-frame counters')
+
+          replace_once('        const quint64 failure_no = t3_quick_hold_failures.fetchAndAddRelaxed(1) + 1;\n',
+                       '''        const quint64 failure_no = t3_quick_hold_failures.fetchAndAddRelaxed(1) + 1;
+                  if (failure_no <= 8 || failure_no % 60 == 0)
+                      umcbT8Log(QStringLiteral("qt_quick_hold_failed failure_no=%1 cpu_value=%2 restore_generation=%3")
+                          .arg(QString::number(static_cast<qulonglong>(failure_no)))
+                          .arg(QString::number(static_cast<qulonglong>(quick_sem_value)))
+                          .arg(QString::number(static_cast<qulonglong>(t3_restore_generation.loadAcquire()))));
+          ''', 'failed holds')
+
+          replace_once('    if (wait_result != VK_SUCCESS) {\n        qCWarning(chiakiGui)\n',
+                       '''    if (wait_result != VK_SUCCESS) {
+                  umcbT8Log(QStringLiteral("vkWaitSemaphores_failed result=%1 cpu_value=%2")
+                      .arg(static_cast<int>(wait_result))
+                      .arg(QString::number(static_cast<qulonglong>(quick_sem_value))));
+                  qCWarning(chiakiGui)
+          ''', 'wait error logging')
+
+          replace_once('        const bool trace = recreation_no <= 24 || recreation_no % 100 == 0;\n        if (trace)\n',
+                       '''        const bool trace = recreation_no <= 24 || recreation_no % 100 == 0;
+                  if (trace)
+                      umcbT8Log(QStringLiteral("swapchain_recreation_begin recreation_no=%1 restore_generation=%2")
+                          .arg(QString::number(static_cast<qulonglong>(recreation_no)))
+                          .arg(QString::number(static_cast<qulonglong>(t3_restore_generation.loadAcquire()))));
+                  if (trace)
+          ''', 'swapchain recreation trigger')
+
+          # The T5 teardown reset remains; the resize reset must be gone.
+          if s.count('quick_sem_value = 0;') != 1:
+              raise SystemExit('T8 PATCH ABORT: expected teardown reset only')
+          if s.count('umcbT8LogSemaphore("resize_counter_preserved"') != 1:
+              raise SystemExit('T8 PATCH ABORT: continuity trace missing')
+          path.write_bytes(s.encode('utf-8'))  # Raw bytes: no CRLF translation on Windows.
+          print('T8 patch complete. Resize counter reset removed; teardown reset retained.')
+          PY
+          # Only the instrumented source file is permitted to change on the runner.
+          changed="$(git diff --name-only)"
+          if test "$changed" != 'gui/src/qmlmainwindow.cpp'; then
+            echo "T8 PATCH ABORT: unexpected changed files: $changed" >&2
+            exit 1
+          fi
+          git diff --check -- gui/src/qmlmainwindow.cpp
+          echo 'T8 ephemeral source change + retained telemetry:'
+          git diff --stat -- gui/src/qmlmainwindow.cpp
+
+      - name: Build pinned T5 libplacebo
+        env:
+          LIBPLACEBO_VERSION: 3330a515d62139259c26239014f286e233bd3a5c
+        run: |
+          scripts/build-libplacebo-windows.sh
+
+      - name: Set up unchanged T5 FFmpeg 7.1 package
+        run: |
+          curl --fail --location --retry 3 --output ffmpeg.zip https://github.com/streetpea/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip
+          unzip -q ffmpeg.zip
+          cp -a ffmpeg-n7.1-latest-win64-gpl-shared-7.1/bin/. /mingw64/bin
+          cp -a ffmpeg-n7.1-latest-win64-gpl-shared-7.1/include/. /mingw64/include
+          cp -a ffmpeg-n7.1-latest-win64-gpl-shared-7.1/lib/. /mingw64/lib
+
+      - name: Build unchanged T5 SDL2 compatibility shim
+        run: |
+          INSTALL_PREFIX=/mingw64 scripts/build-sdl2-compat.sh .
+          cp /mingw64/lib/pkgconfig/sdl2-compat.pc /mingw64/lib/pkgconfig/sdl2.pc
+
+      - name: Configure and build Chiaki-ng T8
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCHIAKI_ENABLE_CLI=OFF -DCHIAKI_ENABLE_STEAMDECK_NATIVE=OFF
+          cmake --build build --config Release --clean-first --target chiaki
+
+      - name: Deploy T8 and create separate launcher
+        run: |
+          ./scripts/deploy-windows-msys2.sh chiaki-ng-Win build/gui/chiaki.exe "${{ github.workspace }}/build/third-party/cpp-steam-tools" /mingw64 gui/src/qml
+          python - <<'PY'
+          from pathlib import Path
+          launcher = '@echo off\nsetlocal\ncd /d "%~dp0"\nif not exist "chiaki.exe" (\n echo T8 error: chiaki.exe is missing from this folder.\n pause\n exit /b 1\n)\nset "UMCB_T8_DIAG=1"\nset "VK_LOADER_DRIVERS_DISABLE=*dzn*"\nif exist "T8-vulkan-diagnostics.log" del /q "T8-vulkan-diagnostics.log"\necho UMCB T8 Vulkan semaphore continuity test. No validation layers enabled.\necho If Chiaki is set to OpenGL, select Vulkan in Chiaki settings and relaunch.\necho Log location: %~dp0T8-vulkan-diagnostics.log\necho First check startup and exit without connecting to the PS4.\necho.\nstart "" /wait "chiaki.exe"\necho.\necho Chiaki exited. Please upload T8-vulkan-diagnostics.log, if present.\npause\n'
+          readme = 'UMCB T8 - Vulkan semaphore continuity experiment (UNVERIFIED test build)\n\nSource base: 838512a440fb838485fc90d1d2f3542c784d67fd (T5)\nlibplacebo: 3330a515d62139259c26239014f286e233bd3a5c (same as T5)\nNo Vulkan validation layer, new SDK, GPU-assisted validation, or AMD driver changes.\nT8 hypothesis: the software timeline counter must not reset when the Vulkan semaphore survives texture recreation.\n\n1. Keep T5 separately; extract T8 into its own directory.\n2. Close other Chiaki instances. Double click Launch-UMCB-T8-Semaphore-Continuity.cmd.\n3. If the renderer preference is OpenGL (left over from T6), select Vulkan,\n   close Chiaki and use the launcher again. Do not force or edit system settings.\n4. FIRST TEST: verify the main window opens and closes normally without PS4 connection.\n   Upload T8-vulkan-diagnostics.log; do not attempt streaming if startup freezes.\n5. Only after successful startup: connect, minimise/restore up to three times,\n   disconnect normally and upload T8-vulkan-diagnostics.log plus Chiaki session logs.\n6. Stop immediately if the app hangs or loses controller/video; save logs before relaunching.\n7. A passing CI build only verifies compilation, not runtime correctness.\n\nThe log is written in this executable folder before any PS4 session. It may include\nsoftware and GPU semaphore counter values at each texture resize.\nDo not assume success from video alone: check Vulkan submit and Qt Quick hold errors. Diagnostic queries\nmay slightly affect timing. Only the T5 resize-counter reset is changed;\nimage ownership, frame pacing and explicit waits are unchanged. Stop on hangs.\n'
+          Path('chiaki-ng-Win/Launch-UMCB-T8-Semaphore-Continuity.cmd').write_bytes(launcher.replace('\n', '\r\n').encode('ascii'))
+          Path('chiaki-ng-Win/T8-READ-ME.txt').write_text(readme, encoding='utf-8')
+          print('T8 launcher and instructions packaged; no Vulkan validation DLLs added')
+          PY
+          test -f chiaki-ng-Win/Launch-UMCB-T8-Semaphore-Continuity.cmd
+          test -f chiaki-ng-Win/T8-READ-ME.txt
+          test -f chiaki-ng-Win/chiaki.exe
+
+      - name: ZIP portable diagnostic and hash
+        run: |
+          zip -qr chiaki-ng-UMCB-T8-Vulkan-Semaphore-Continuity.zip chiaki-ng-Win
+          test -s chiaki-ng-UMCB-T8-Vulkan-Semaphore-Continuity.zip
+          sha256sum chiaki-ng-UMCB-T8-Vulkan-Semaphore-Continuity.zip
+
+      - name: Upload T8 portable diagnostic artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chiaki-ng-UMCB-T8-Vulkan-Semaphore-Continuity
+          path: chiaki-ng-UMCB-T8-Vulkan-Semaphore-Continuity.zip
+          if-no-files-found: error
+          retention-days: 7
