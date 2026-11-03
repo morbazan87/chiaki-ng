@@ -1221,6 +1221,10 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
     chiaki_log_mutex.lock();
     chiaki_log_ctx = session->GetChiakiLog();
     chiaki_log_mutex.unlock();
+    // This is after the session log is attached, unlike the worker constructor.
+    qCInfo(chiakiGui) << "[UMCB-M1.1] session_observer_enabled="
+                      << (umcb_frame_observer ? 1 : 0)
+                      << "sampling_max_fps=2";
 
     if(connect_info.duid.isEmpty())
     {

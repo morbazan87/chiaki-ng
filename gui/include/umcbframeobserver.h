@@ -36,10 +36,11 @@ private:
     std::atomic<uint64_t> cloneFailures_{0};
     std::mutex mutex_;
     std::condition_variable wake_;
-    std::thread worker_;
     AVFrame *pending_ = nullptr;
     int64_t pendingAtUs_ = 0;
     uint64_t generation_ = 0;
     bool workerBusy_ = false;
     bool stopping_ = false;
+    // Construct the worker only after all state it can read.
+    std::thread worker_;
 };
