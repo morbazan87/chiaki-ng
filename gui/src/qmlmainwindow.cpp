@@ -6162,7 +6162,8 @@ void QmlMainWindow::resizeSwapchain()
     quick_tex = new_quick_tex;
     quick_vk_image = new_quick_vk_image;
     quick_vk_format = vk_format;
-    quick_sem_value = 0;
+    // Preserve the timeline counter when recreating only the texture.
+    // The same Vulkan timeline semaphore remains alive across resize.
     swapchain_size = new_swapchain_size;
     quick_window->setRenderTarget(QQuickRenderTarget());
 }
