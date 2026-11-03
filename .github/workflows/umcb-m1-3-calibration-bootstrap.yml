@@ -1,0 +1,176 @@
+# UMCB M1.3 one-time source installer. Do not leave this in release builds.
+# Create umcb/m1-3-supervised-calibration from observer SHA 527f66af151c426027dcf98c58dd6d5f5abc180c.
+name: UMCB M1.3 One-Time Supervised Calibration Setup
+on:
+  push:
+    branches:
+      - umcb/m1-3-supervised-calibration
+permissions:
+  contents: write
+jobs:
+  install-calibration:
+    if: github.ref == 'refs/heads/umcb/m1-3-supervised-calibration'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: true
+      - name: Check exact observer parent and file hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = '527f66af151c426027dcf98c58dd6d5f5abc180c' || { echo 'ABORT: branch must be based on current observer'; exit 1; }
+          test "$(git hash-object gui/CMakeLists.txt)" = "aa92d0ae8fed1b51a58b2dd7b622158ff2c2a2a6" || { echo "ABORT: base file mismatch: gui/CMakeLists.txt"; exit 1; }
+          test "$(git hash-object gui/include/qmlbackend.h)" = "e4c2034e69c9b903d6663ebeab9bcdc13f8c4ba8" || { echo "ABORT: base file mismatch: gui/include/qmlbackend.h"; exit 1; }
+          test "$(git hash-object gui/src/qmlbackend.cpp)" = "fe0d390b9421840bc845ec8f90892a5b47dca73c" || { echo "ABORT: base file mismatch: gui/src/qmlbackend.cpp"; exit 1; }
+          test -z "$(git status --porcelain)" || { echo 'ABORT: working tree not clean'; exit 1; }
+      - name: Install bounded source changes once
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          
+          from pathlib import Path
+          import base64, gzip
+          
+          def one(filename, old, new):
+              p=Path(filename)
+              t=p.read_text(encoding='utf-8')
+              n=t.count(old)
+              if n != 1:
+                  raise SystemExit('UMCB M1.3: exact source anchor failed in '+filename+': '+str(n))
+              p.write_text(t.replace(old,new,1),encoding='utf-8')
+          
+          one('gui/CMakeLists.txt',
+              'find_package(Qt6 REQUIRED COMPONENTS Core Gui Concurrent Svg Qml Quick Widgets)',
+              'find_package(Qt6 REQUIRED COMPONENTS Core Gui Concurrent Svg Qml Quick Widgets Network)')
+          one('gui/CMakeLists.txt',
+              '\tinclude/umcbframeobserver.h\n\tsrc/umcbframeobserver.cpp\n',
+              '\tinclude/umcbframeobserver.h\n\tsrc/umcbframeobserver.cpp\n\tinclude/umcbcalibrationcapture.h\n\tsrc/umcbcalibrationcapture.cpp\n')
+          one('gui/CMakeLists.txt',
+              'Qt::Concurrent Qt::Svg Qt::Qml Qt::Quick Qt::Widgets)',
+              'Qt::Concurrent Qt::Svg Qt::Qml Qt::Quick Qt::Widgets Qt::Network)')
+          
+          one('gui/include/qmlbackend.h',
+              'class UMCBFrameObserver;\n',
+              'class UMCBFrameObserver;\nclass UMCBCalibrationCapture;\n')
+          one('gui/include/qmlbackend.h',
+              '    std::unique_ptr<UMCBFrameObserver> umcb_frame_observer;\n',
+              '    std::unique_ptr<UMCBFrameObserver> umcb_frame_observer;\n'
+              '    std::unique_ptr<UMCBCalibrationCapture> umcb_calibration_capture;\n')
+          
+          one('gui/src/qmlbackend.cpp',
+              '#include "umcbframeobserver.h"\n',
+              '#include "umcbframeobserver.h"\n#include "umcbcalibrationcapture.h"\n')
+          one('gui/src/qmlbackend.cpp',
+              '#include <QTimer>\n',
+              '#include <QTimer>\n#ifdef Q_OS_WIN\n#include <QLocalServer>\n#include <QLocalSocket>\n#include <QCoreApplication>\n#endif\n')
+          one('gui/src/qmlbackend.cpp',
+              '    if (qEnvironmentVariableIntValue("UMCB_FRAME_OBSERVER") == 1)\n'
+              '        umcb_frame_observer = std::make_unique<UMCBFrameObserver>();\n',
+              '    if (qEnvironmentVariableIntValue("UMCB_FRAME_OBSERVER") == 1)\n'
+              '        umcb_frame_observer = std::make_unique<UMCBFrameObserver>();\n'
+              """#ifdef Q_OS_WIN
+              if (qEnvironmentVariableIntValue("UMCB_CALIBRATION") == 1) {
+                  umcb_calibration_capture = std::make_unique<UMCBCalibrationCapture>();
+                  auto *server = new QLocalServer(this);
+                  server->setSocketOptions(QLocalServer::UserAccessOption);
+                  const QString pipeName = QStringLiteral("UMCB_CAL_%1").arg(QCoreApplication::applicationPid());
+                  if (server->listen(pipeName)) {
+                      qInfo().noquote() << "[UMCB-M1.3] Calibration local pipe" << pipeName;
+                      connect(server, &QLocalServer::newConnection, this, [this, server] {
+                          while (auto *socket = server->nextPendingConnection()) {
+                              connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
+                              connect(socket, &QLocalSocket::readyRead, this, [this, socket] {
+                                  QByteArray data = socket->property("umcbRequest").toByteArray() + socket->readAll();
+                                  if (data.size() > 96) {
+                                      socket->write("ERROR request_too_long\\n");
+                                      socket->disconnectFromServer();
+                                      return;
+                                  }
+                                  if (!data.contains('\\n')) {
+                                      socket->setProperty("umcbRequest", data);
+                                      return;
+                                  }
+                                  const QString cmd = QString::fromUtf8(data.left(data.indexOf('\\n'))).trimmed();
+                                  QString reply;
+                                  if (cmd == "STATUS")
+                                      reply = umcb_calibration_capture->status();
+                                  else if (cmd.startsWith("CAPTURE "))
+                                      reply = umcb_calibration_capture->request(cmd.mid(8));
+                                  else
+                                      reply = "ERROR unknown_command";
+                                  socket->write((reply + "\\n").toUtf8());
+                                  socket->flush();
+                                  socket->disconnectFromServer();
+                              });
+                          }
+                      });
+                      auto *watchdog = new QTimer(this);
+                      watchdog->setInterval(1000);
+                      connect(watchdog, &QTimer::timeout, this, [this] {
+                          umcb_calibration_capture->expireStalled();
+                      });
+                      watchdog->start();
+                  } else {
+                      qWarning() << "[UMCB-M1.3] Could not open local calibration pipe:" << server->errorString();
+                      umcb_calibration_capture.reset();
+                  }
+              }
+          #endif
+          """)
+          one('gui/src/qmlbackend.cpp',
+              '    umcb_frame_observer.reset();\n    frame_thread->parent()->deleteLater();',
+              '    umcb_frame_observer.reset();\n'
+              '    umcb_calibration_capture.reset();\n'
+              '    frame_thread->parent()->deleteLater();')
+          one('gui/src/qmlbackend.cpp',
+              '        if (umcb_frame_observer && !frame.recovered)\n'
+              '            umcb_frame_observer->sample(frame.frame);\n',
+              '        if (umcb_frame_observer && !frame.recovered)\n'
+              '            umcb_frame_observer->sample(frame.frame);\n'
+              '        if (umcb_calibration_capture && !frame.recovered)\n'
+              '            umcb_calibration_capture->observe(frame.frame);\n')
+          one('gui/src/qmlbackend.cpp',
+              '        if (umcb_frame_observer)\n'
+              '            umcb_frame_observer->clearPending();\n',
+              '        if (umcb_frame_observer)\n'
+              '            umcb_frame_observer->clearPending();\n'
+              '        if (umcb_calibration_capture)\n'
+              '            umcb_calibration_capture->cancelSession();\n')
+          one('gui/src/qmlbackend.cpp',
+              '    qCInfo(chiakiGui) << "[UMCB-M1.1] session_observer_enabled="\n',
+              '    qCInfo(chiakiGui) << "[UMCB-M1.3] calibration_enabled="\n'
+              '                      << (umcb_calibration_capture ? 1 : 0);\n'
+              '    qCInfo(chiakiGui) << "[UMCB-M1.1] session_observer_enabled="\n')
+          
+          payloads = {
+              'gui/include/umcbcalibrationcapture.h': 'H4sIAAAAAAAC/5VU204bMRB9368YgUShagIVqA/hIkFQEVJQU6K0fYscezax4rW3voREqP32jjfeZAMBqTwE7ZnxGZ+ZMz4+hkH/9lerJzlqh617gdrLXKLtQMIeMW9d3/V7rdP2SctotWx9K1EPBr3s+BiGD90bePjcPu3A2AQtUEBwaFuKjVEp+uKs9MGiA5ODQG5iRn9wBnMp0MDhT6mFeXLg0XmI5EftbL+0bFIw+uSYZftScxUEwgXzppD8qoFwo4X00ujRnFnJxgq3os4LqX0TKoLHRRPwU4tMNJHvA2+lnlxlmfM2cA/XP75aVuB5lnHFnKskd5mSY8ti6e5KIORSM5U9Z2UYK8k7GdDf7tTDo/Mq+vf98BtR0kyteuMSB0dwSW1W6PE9EjgwJRJi7OV/8FWENHPKi5PNrSnATxHuhvew6mP8Z8JkCmzlAqlpOsyj+ATKcKYq+wA3RcG0aFd8qd1g8XcgD6Tr1OhB5aPUkBp0nvng6jbNjRSAi1JaHPjqZlsRzshFaoDOkaw6shFhNHSnks3kB0ck0vlYIPm0lce5R/lyjnaZNJ6DRvqEJyvJtKQ0lwrbm4JmTMrn9ZySeeBjxUXls9LKObWksznxZOwMbc+Ysr5fVCg5kHm/nI08FEYbb7Tkw7Xquhe5UQJtn/np4RFUJdOcyPudzmpjLsbGqCtg3JOO0XPOlMM/56+yUrUr0rfwtwGHbvR8siMvrBPdTJYliqF2oSyNpTm/OFGtG1S/owb8em3hic0wpaxbRq8M7e9kRBbUQanS223tKd6LFkln6Wo1fE+P0SKePVmF6mvX8TvUuDJ7I6mmVg3ODeb8I7qgfDywJ4XCvRfUk12c66hjcxQ3S3JNIxpvTM4P1LttkLakjHv3EierI38NV+T3BZu8ZK9Kp+2iBbF+uCshiutbM6GX2m0lRO8kh94Et4yRykCNqPOmLNOgGrG4ZNGQ1SMa+TuJhwxBm0GWBocIQa9eCSUd7WOBxRita2/Mkl6W1VEaCfnrH6SVRT21BgAA',
+              'gui/src/umcbcalibrationcapture.cpp': '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',
+              'tools/UMCB-Calibrate.ps1': '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',
+          }
+          
+          for filename, encoded in payloads.items():
+              p=Path(filename)
+              if p.exists():
+                  raise SystemExit('UMCB M1.3 ABORT: new source file already exists '+filename)
+              p.parent.mkdir(parents=True,exist_ok=True)
+              p.write_bytes(gzip.decompress(base64.b64decode(encoded)))
+          print('UMCB M1.3: installed ordinary calibration source and optional Windows panel')
+          
+          PYCODE
+          git diff --check
+          test "$(git status --porcelain --untracked-files=all | sed 's/^...//' | sort)" = "$(printf '%s\n' 'gui/CMakeLists.txt' 'gui/include/qmlbackend.h' 'gui/include/umcbcalibrationcapture.h' 'gui/src/qmlbackend.cpp' 'gui/src/umcbcalibrationcapture.cpp' 'tools/UMCB-Calibrate.ps1' | sort)" || { echo 'ABORT: unexpected changed paths'; git status --short; exit 1; }
+      - name: Commit ordinary source, remove temporary workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add 'gui/CMakeLists.txt' 'gui/include/qmlbackend.h' 'gui/include/umcbcalibrationcapture.h' 'gui/src/qmlbackend.cpp' 'gui/src/umcbcalibrationcapture.cpp' 'tools/UMCB-Calibrate.ps1'
+          git rm .github/workflows/umcb-m1-3-calibration-bootstrap.yml
+          git diff --cached --check
+          test "$(git diff --cached --name-only | sort)" = "$(printf '%s\n' .github/workflows/umcb-m1-3-calibration-bootstrap.yml 'gui/CMakeLists.txt' 'gui/include/qmlbackend.h' 'gui/include/umcbcalibrationcapture.h' 'gui/src/qmlbackend.cpp' 'gui/src/umcbcalibrationcapture.cpp' 'tools/UMCB-Calibrate.ps1' | sort)" || { echo 'ABORT: unexpected staged paths'; exit 1; }
+          git commit -m 'UMCB M1.3: supervised labelled PS4-frame calibration [skip ci]'
+          git push origin HEAD:umcb/m1-3-supervised-calibration
